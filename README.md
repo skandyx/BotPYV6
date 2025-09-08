@@ -47,89 +47,72 @@ The application is designed with a dark, modern aesthetic (`bg-[#0c0e12]`), usin
 
 # Version Française
 
-## 🧠 Stratégie Complète : “Chasseur de Précision Macro-Micro + Ignition + SL Suiveur ⚡”
+## 🚀 Stratégie Finale Pondérée avec Ignition + Stop Loss Suiveur ⚡
 
-La philosophie du bot est d'être un prédateur chirurgical, capable de s'adapter à différentes conditions de marché pour capturer des mouvements explosifs. Il utilise un système de notation multi-niveaux pour quantifier la qualité de chaque opportunité.
+### **Phase 1 – Radar Macro (Hotlist)**
 
----
+**👉 Objectif :** détecter les paires à potentiel.
 
-### **Phase 1 : Radar Macro (Génération de la Hotlist)**
-
-**Objectif :** Identifier les paires de devises présentant un fort potentiel haussier et les placer sur une "Hotlist" pour une surveillance intensive.
-
-| Condition | Indicateur | Score |
+| Indicateur | Condition | Score |
 | :--- | :--- | :--- |
-| Tendance Haussière 4h | Prix de clôture > MME50 (4h) | 3 |
-| Compression Volatilité 15m | Bollinger Band Squeeze < 25% quartile sur 50 périodes | 3 |
-| Filtre d'Ignition 15m | Bougie précédente avec volume > 2× moyenne + clôture proche de la bande supérieure des BB | +2 |
+| **Tendance 4h** | Tendance de fond (MME200, RSI, MACD) | Score pondéré de -2 à +2 |
+| **Tendance 15m** | Tendance locale (MME50/200, RSI, MACD) | Score pondéré de -2 à +2 |
+| **Corrélation BTC/ETH** | Cohérente avec la tendance | +1 |
+| **Volume Relatif** | Volume 15m vs. moyenne | 1.3× → +1, 1.5× → +2, 2× → +3 (Boost Ignition) |
 
-**Logique de la Hotlist :**
-```
-Score_Hotlist = Score_Tendance + Score_Bollinger + Score_Ignition
-Seuil_Hotlist = 5
-
-Si Score_Hotlist >= Seuil_Hotlist:
-    Ajouter la paire à la Hotlist
-    S'abonner aux flux de données 1m et 5m
-```
+**✅ Seuil d’entrée en Hotlist :** `Score ≥ 5`
 
 ---
 
-### **Phase 2 : Déclencheur Micro & Confirmation (Analyse 1m + 5m)**
+### **Phase 2 – Déclencheur Micro & Confirmation (1m + 5m)**
 
-**Objectif :** Détecter le point d’entrée précis avec une confirmation multi-échelles pour les paires de la Hotlist, en utilisant un système de notation pour évaluer la confiance du signal.
-
-| Condition | Indicateur | Score |
+| Indicateur (Bougie 1m) | Condition | Score |
 | :--- | :--- | :--- |
-| Momentum 1m | Prix de clôture > MME9 (1m) | 2 |
-| Volume 1m | Volume > 1.5 × moyenne récente (1m) | 1 |
-| OBV 1m | OBV ascendant (1m) | 1 |
-| CVD 5m | CVD ascendant (5m) | 1 |
-| Clôture 5m haussière | Bougie 5m > prix de déclenchement 1m | 2 |
-| Sécurité RSI | RSI 15m & 1h non suracheté | 1 |
-| Mèche haute | Bougie 1m sans mèche excessive | 1 |
-| Mouvement Parabolique | Pas de hausse verticale récente | 1 |
-| Déclencheur d'Ignition 1m | Bougie 1m avec volume > 2× et clôture > MME9 + momentum | +2 |
+| **Momentum** | Clôture > MME9 | +1 |
+| **RSI** | Croise 50 à la hausse | +1 |
+| **MACD** | Croisement haussier | +1 |
+| **Volume** | > 1.5× la moyenne | +2 (Boost Ignition) |
+| **Confirmation 5m** | Bougie 5m soutient le mouvement | +2 (ou 0, ou -1 si contradiction) |
+| **Filtres Additionnels**| OBV, CVD, Sécurité (RSI, Mèches, etc.) | +3 (potentiel) |
 
-**Calcul du Score de Trade :**
-```
-Score_Trade = somme(Scores_des_conditions)
-Seuil_Trade_High = 8
-Seuil_Trade_Low = 5
 
-Si Score_Trade >= Seuil_Trade_High:
-    Trade = Haute Confiance (souvent avec Ignition)
-Sinon si Score_Trade >= Seuil_Trade_Low:
-    Trade = Faible Confiance
-Sinon:
-    Pas de trade
-```
+**✅ Signal d’entrée :** `Score ≥ 8`
 
 ---
 
-### **Phase 2.5 : Sélecteur de Profil Dynamique**
+### **Phase 2.5 – Sélecteur de Profil Dynamique**
 
-**Objectif :** Adapter la gestion du trade au type de marché actuel en analysant la force de la tendance (ADX) et la volatilité (ATR) sur le graphique 15m.
+Analyse ADX (15m) + ATR (volatilité relative) :
 
 | Profil | Condition (15m) | Style de Gestion |
 | :--- | :--- | :--- |
-| **Scalpeur** | ADX < Seuil_Range (ex: 20) | SL serré, TP rapide, SL Suiveur ⚡ activé pour Ignition. |
-| **Chasseur Volatilité** | ATR% > Seuil_Volatil (ex: 5%) | SL basé sur l'ATR, TP dynamique, Trailing Stop agressif, SL Suiveur ⚡. |
-| **Sniper** | Marché stable (défaut) | Prise partielle, Break-even, Trailing Stop, SL Suiveur ⚡ pour Ignition. |
+| **Scalpeur** | ADX < 20, ATR bas | SL fixe (0.3%), TP rapide (0.6%) |
+| **Chasseur Volatilité**| ADX > 20, ATR modéré | SL basé sur l'ATR, TP dynamique (1-2%), trailing agressif |
+| **Sniper** | ADX > 25, ATR haut | Prise partielle (50% à +1%), SL à break-even, trailing large |
 
 ---
 
-### **Phase 3 : Gestion du Trade**
+### **Phase 3 – Gestion Active & Stop Loss Suiveur ⚡**
 
-#### **Stop Loss Suiveur Éclair ⚡ (pour les trades d'Ignition)**
+🎯 Une fois en position :
 
-C'est une arme secrète pour les mouvements les plus explosifs.
-1.  Une fois qu'un seuil de profit est atteint (ex: +0,5%), le SL se déplace agressivement au-dessus du prix d’entrée pour garantir un gain minimal.
-2.  Le SL suit ensuite le prix en temps réel avec un très petit décalage (ex: 0,2%), capturant la majorité du mouvement vertical tout en se protégeant contre un retournement soudain.
-3.  **Objectif :** Sécuriser les gains d'une tendance explosive tout en laissant le potentiel de hausse s'exprimer.
+1.  Stop Loss classique placé (selon profil).
+2.  Dès que le profit atteint `≥ +0.5%`, le **Stop Loss Suiveur ⚡** est activé :
+    -   Le SL est d'abord déplacé au-dessus du prix d’entrée pour garantir un trade sans perte.
+    -   Ensuite, il suit le prix avec un delta serré (ex: 0.2% – 0.5%) pour sécuriser les gains tout en laissant courir le mouvement.
 
-#### **Gestion par Profil :**
+---
 
-*   **Scalpeur :** Sortie rapide, SL serré, TP court, SL Suiveur ⚡ actif si Ignition.
-*   **Chasseur Volatilité :** SL basé sur l'ATR, TP dynamique, Trailing Stop agressif, SL Suiveur ⚡ actif.
-*   **Sniper :** Prise de profit partielle, mise à break-even, trailing stop standard, et SL Suiveur ⚡ activé si le trade a été déclenché par un signal d'Ignition.
+### **Règles d’Ignition (Breakout Explosif)**
+
+Détecté si :
+
+-   **Volume** > 1.5× (bonus), >2× (boost fort)
+-   **RSI** > 55 et **MACD** positif
+-   Bougie longue avec clôture au-dessus d’un niveau clé (ex: MME200)
+
+⚡ **Action spéciale Ignition :**
+
+-   Entrée agressive (seuil de score abaissé à 6).
+-   SL serré + **Stop Loss Suiveur ⚡ obligatoire.**
+-   Objectif : capter les gros breakouts sans rater l'explosion initiale.
