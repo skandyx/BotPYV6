@@ -1,0 +1,5 @@
+{
+  "name": "Trading BotPYV6 Dashboard",
+  "description": "A comprehensive dashboard to monitor and control a multi-pair USDT automated trading bot. It provides real-time status, position management, performance analysis, and configuration options.",
+  "requestFramePermissions": []
+}

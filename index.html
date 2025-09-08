@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF--8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+      }
+      .font-spacemono {
+        font-family: 'Space Mono', monospace;
+      }
+    </style>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.1.1",
+    "react-dom/": "https://esm.sh/react-dom@^19.1.1/",
+    "react-router-dom": "https://esm.sh/react-router-dom@^7.8.1",
+    "react/": "https://esm.sh/react@^19.1.1/",
+    "recharts": "https://esm.sh/recharts@^3.1.2",
+    "technicalindicators": "https://esm.sh/technicalindicators@^3.1.0",
+    "express": "https://esm.sh/express@^5.1.0",
+    "body-parser": "https://esm.sh/body-parser@^2.2.0",
+    "cors": "https://esm.sh/cors@^2.8.5",
+    "fs/": "https://esm.sh/fs@^0.0.1-security/",
+    "path": "https://esm.sh/path@^0.12.7",
+    "dotenv": "https://esm.sh/dotenv@^17.2.1",
+    "vite": "https://esm.sh/vite@^7.1.2",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.0.0",
+    "express-session": "https://esm.sh/express-session@^1.18.2",
+    "crypto": "https://esm.sh/crypto@^1.0.1",
+    "ws": "https://esm.sh/ws@^8.18.3",
+    "http": "https://esm.sh/http@^0.0.1-security",
+    "node-fetch": "https://esm.sh/node-fetch@^3.3.2",
+    "@google/genai": "https://esm.sh/@google/genai",
+    "marked": "https://esm.sh/marked@^13.0.2"
+  }
+}
+</script>
+</head>
+  <body class="bg-[#0c0e12] text-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

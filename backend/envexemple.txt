@@ -1,0 +1,154 @@
+# -----------------------------------------------------------------------------
+# BOTPY BACKEND ENVIRONMENT CONFIGURATION
+#
+# Instructions:
+# 1. Copiez ce fichier et renommez-le en ".env" dans le même dossier (/backend).
+# 2. Remplissez les valeurs ci-dessous avec vos propres informations.
+# 3. Ne partagez jamais votre fichier .env publiquement.
+# -----------------------------------------------------------------------------
+
+# --- CORE SETTINGS ---
+NODE_ENV=production
+PORT=8080
+APP_PASSWORD=votre_mot_de_passe_secret
+
+# --- TRADING PARAMETERS (OPTIMAL DEFAULTS) ---
+INITIAL_VIRTUAL_BALANCE=10000
+MAX_OPEN_POSITIONS=5
+POSITION_SIZE_PCT=2.0
+RISK_REWARD_RATIO=4.0
+STOP_LOSS_PCT=2.0
+SLIPPAGE_PCT=0.05
+
+# --- STRATEGY & SCANNER FILTERS ---
+MIN_VOLUME_USD=40000000
+SCANNER_DISCOVERY_INTERVAL_SECONDS=3600
+EXCLUDED_PAIRS="USDCUSDT,FDUSDUSDT,TUSDUSDT,BUSDUSDT"
+# Note: Les booléens ci-dessous sont 'true' par défaut sauf si vous les mettez explicitement à 'false'.
+# Ex: USE_DYNAMIC_PROFILE_SELECTOR=false
+USE_VOLUME_CONFIRMATION=true
+USE_MARKET_REGIME_FILTER=true
+REQUIRE_STRONG_BUY=false
+LOSS_COOLDOWN_HOURS=4
+
+# --- ADVANCED ENTRY CONFIRMATION ---
+# Attendre la confirmation sur une unité de temps supérieure (5m) avant d'entrer. (true/false)
+USE_MTF_VALIDATION=false
+# Utiliser la confirmation de volume par On-Balance Volume (OBV). (true/false)
+USE_OBV_VALIDATION=true
+# Activer le filtre de confirmation par Cumulative Volume Delta (CVD) sur 5m. (true/false)
+USE_CVD_FILTER=false
+
+
+# --- NEW ADVANCED CONFIRMATION FILTERS ---
+# Utiliser un filtre RSI multi-temporels (15m) pour éviter les entrées tardives. (true/false)
+USE_RSI_MTF_FILTER=true
+RSI_15M_OVERBOUGHT_THRESHOLD=70
+# Activer la détection des mèches de bougie anormales pour éviter les pièges. (true/false)
+USE_WICK_DETECTION_FILTER=true
+# Pourcentage maximum de la mèche supérieure par rapport à la taille totale de la bougie.
+MAX_UPPER_WICK_PCT=50
+# Valider la tendance de l'OBV également sur la bougie de confirmation de 5 minutes. (true/false)
+USE_OBV_5M_VALIDATION=false
+
+# --- ADVANCED STRATEGY & RISK MANAGEMENT ---
+# Utiliser un Stop Loss dynamique basé sur l'ATR. (true/false)
+USE_ATR_STOP_LOSS=true
+# Le multiplicateur à appliquer à l'ATR pour définir la distance du Stop Loss (ex: 1.5).
+ATR_MULTIPLIER=1.5
+
+# Déplacer automatiquement le Stop Loss au point d'entrée. (true/false)
+USE_AUTO_BREAKEVEN=true
+# Le multiple de risque (R) pour déclencher le break-even (ex: 1.0 pour +1R).
+BREAKEVEN_TRIGGER_R=1.0
+# Si activé, le break-even couvrira aussi les frais de transaction (true/false).
+ADJUST_BREAKEVEN_FOR_FEES=true
+# Le pourcentage de frais par ordre (ex: 0.1 pour 0.1%).
+TRANSACTION_FEE_PCT=0.1
+
+# Empêcher l'ouverture de trades si le RSI est en zone de surachat. (true/false)
+USE_RSI_SAFETY_FILTER=true
+# Le seuil RSI au-dessus duquel un signal d'achat sera ignoré.
+RSI_OVERBOUGHT_THRESHOLD=75
+
+# Vendre une partie de la position à un objectif de profit préliminaire. (true/false)
+USE_PARTIAL_TAKE_PROFIT=true
+# Le pourcentage de profit (%) pour déclencher la vente partielle.
+PARTIAL_TP_TRIGGER_PCT=0.8
+# Le pourcentage (%) de la quantité initiale à vendre pour la prise de profit partielle.
+PARTIAL_TP_SELL_QTY_PCT=50
+
+# Allouer une plus grande taille de position pour les signaux de haute qualité 'STRONG BUY'. (true/false)
+USE_DYNAMIC_POSITION_SIZING=false
+# Le pourcentage du solde à utiliser pour un signal 'STRONG BUY'.
+STRONG_BUY_POSITION_SIZE_PCT=3.0
+
+# Filtre pour éviter d'entrer sur des mèches de liquidité. (true/false)
+USE_PARABOLIC_FILTER=true
+# La période (en minutes) sur laquelle vérifier une hausse de prix excessive avant d'entrer.
+PARABOLIC_FILTER_PERIOD_MINUTES=5
+# Le pourcentage de hausse maximum autorisé sur la période de vérification.
+PARABOLIC_FILTER_THRESHOLD_PCT=2.5
+
+# --- ADAPTIVE BEHAVIOR ---
+# Activer le sélecteur de profil dynamique. (true/false) - FORTEMENT RECOMMANDÉ
+USE_DYNAMIC_PROFILE_SELECTOR=true
+# Le seuil ADX (15m) en dessous duquel le marché est considéré en "range".
+ADX_THRESHOLD_RANGE=20
+# Le seuil ATR (en % du prix) au-dessus duquel le marché est considéré volatil.
+ATR_PCT_THRESHOLD_VOLATILE=5.0
+# Logique d'entrée agressive. (Doit rester false ici, est géré par les profils).
+USE_AGGRESSIVE_ENTRY_LOGIC=false
+
+# Stop suiveur adaptatif qui se resserre avec les profits. (true/false)
+USE_ADAPTIVE_TRAILING_STOP=true
+# Le multiple de risque (R) à atteindre pour resserrer le stop.
+TRAILING_STOP_TIGHTEN_THRESHOLD_R=1.0
+# La valeur de réduction du multiplicateur ATR après resserrement.
+TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION=0.3
+
+# --- PORTFOLIO INTELLIGENCE ---
+# Configuration des entrées fractionnées (ex: "50,50" ou "40,30,30"). Laisser vide pour désactiver.
+SCALING_IN_CONFIG="50,50"
+# Nombre maximum de trades sur altcoins ouverts en même temps.
+MAX_CORRELATED_TRADES=2
+# Activer la pause automatique en cas de sentiment de marché extrême. (true/false)
+USE_FEAR_AND_GREED_FILTER=true
+
+# --- ADVANCED PORTFOLIO FILTERS ---
+# Activer le filtre de liquidité du carnet d'ordres. (true/false)
+USE_ORDER_BOOK_LIQUIDITY_FILTER=true
+# Liquidité minimale en USD requise dans le carnet (dans +/- 0.5% du prix).
+MIN_ORDER_BOOK_LIQUIDITY_USD=200000
+# Activer le filtre de corrélation par secteur. (true/false)
+USE_SECTOR_CORRELATION_FILTER=true
+# Activer le filtre de détection de manipulation ("anti-baleine"). (true/false)
+USE_WHALE_MANIPULATION_FILTER=true
+# Seuil de volume (en % du volume horaire moyen) pour détecter une manipulation.
+WHALE_SPIKE_THRESHOLD_PCT=5.0
+
+# --- GLOBAL SAFETY ---
+# Pourcentage de chute de BTC sur 5 minutes pour déclencher une alerte.
+CIRCUIT_BREAKER_WARN_THRESHOLD_PCT=1.5
+# Pourcentage de chute de BTC sur 5 minutes pour déclencher un arrêt complet.
+CIRCUIT_BREAKER_HALT_THRESHOLD_PCT=2.5
+# Seuil de perte journalière (en %) pour arrêter le bot pour la journée.
+DAILY_DRAWDOWN_LIMIT_PCT=3.0
+# Nombre de pertes consécutives pour mettre le bot en pause.
+CONSECUTIVE_LOSS_LIMIT=5
+
+# --- EXPERIMENTAL STRATEGIES (USE WITH CAUTION) ---
+# Activer la stratégie d'Ignition pour détecter les pumps. (true/false)
+USE_IGNITION_STRATEGY=false
+# Pourcentage de hausse de prix sur 1m pour un signal Ignition.
+IGNITION_PRICE_THRESHOLD_PCT=5.0
+# Multiplicateur de volume sur 1m pour un signal Ignition.
+IGNITION_VOLUME_MULTIPLIER=10
+# Activer le stop loss suiveur ultra-réactif pour les trades Ignition. (true/false)
+USE_FLASH_TRAILING_STOP=false
+# Pourcentage du stop suiveur éclair.
+FLASH_TRAILING_STOP_PCT=1.5
+
+# --- API CREDENTIALS ---
+BINANCE_API_KEY=votre_cle_api_binance
+BINANCE_SECRET_KEY=votre_cle_secrete_binance
