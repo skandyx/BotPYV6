@@ -1,4 +1,3 @@
-
 import React from 'react';
 
 const iconProps = {
@@ -85,5 +84,11 @@ export const SidebarToggleIcon: React.FC<{ isCollapsed: boolean }> = ({ isCollap
 export const MenuIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg className={className || "h-6 w-6"} fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+    </svg>
+);
+
+export const SignalIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className || "h-4 w-4"} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M7 14.25V17.25M12 11.25V17.25M17 8.25V17.25" />
     </svg>
 );

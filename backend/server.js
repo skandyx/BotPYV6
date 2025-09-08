@@ -12,6 +12,8 @@ import http from 'http';
 import fetch from 'node-fetch';
 import { ScannerService } from './ScannerService.js';
 import { RSI, ADX, ATR, MACD, SMA, BollingerBands, EMA } from 'technicalindicators';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
 
 
 // --- Basic Setup ---
@@ -205,14 +207,97 @@ function formatQuantity(symbol, quantity) {
 // --- Persistence ---
 const DATA_DIR = path.join(process.cwd(), 'data');
 const SETTINGS_FILE_PATH = path.join(DATA_DIR, 'settings.json');
-const STATE_FILE_PATH = path.join(DATA_DIR, 'state.json');
 const AUTH_FILE_PATH = path.join(DATA_DIR, 'auth.json');
 const KLINE_DATA_DIR = path.join(DATA_DIR, 'klines');
+let db;
 
 const ensureDataDirs = async () => {
     try { await fs.access(DATA_DIR); } catch { await fs.mkdir(DATA_DIR); }
     try { await fs.access(KLINE_DATA_DIR); } catch { await fs.mkdir(KLINE_DATA_DIR); }
 };
+
+// --- Database (SQLite) ---
+const initDb = async () => {
+    try {
+        db = await open({
+            filename: path.join(DATA_DIR, 'bot.db'),
+            driver: sqlite3.Database
+        });
+
+        await db.exec(`
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                average_entry_price REAL NOT NULL,
+                exit_price REAL,
+                quantity REAL NOT NULL,
+                target_quantity REAL NOT NULL,
+                total_cost_usd REAL NOT NULL,
+                stop_loss REAL NOT NULL,
+                initial_stop_loss REAL,
+                take_profit REAL NOT NULL,
+                highest_price_since_entry REAL NOT NULL,
+                entry_time TEXT NOT NULL,
+                exit_time TEXT,
+                pnl REAL,
+                pnl_pct REAL,
+                status TEXT NOT NULL,
+                is_at_breakeven INTEGER NOT NULL DEFAULT 0,
+                partial_tp_hit INTEGER NOT NULL DEFAULT 0,
+                realized_pnl REAL DEFAULT 0,
+                trailing_stop_tightened INTEGER NOT NULL DEFAULT 0,
+                is_scaling_in INTEGER NOT NULL DEFAULT 0,
+                current_entry_count INTEGER DEFAULT 1,
+                total_entries INTEGER DEFAULT 1,
+                strategy_type TEXT,
+                entry_snapshot TEXT,
+                management_settings TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS key_value_store (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        `);
+        log('INFO', 'SQLite database schema checked/created.');
+    } catch (err) {
+        log('ERROR', `Failed to initialize SQLite database: ${err.message}`);
+        process.exit(1);
+    }
+};
+
+const getKeyValue = async (key) => (await db.get('SELECT value FROM key_value_store WHERE key = ?', key))?.value;
+const setKeyValue = async (key, value) => await db.run('INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)', key, value);
+
+const parseDbTrade = (dbRow) => {
+    if (!dbRow) return null;
+    return {
+        ...dbRow,
+        is_at_breakeven: !!dbRow.is_at_breakeven,
+        partial_tp_hit: !!dbRow.partial_tp_hit,
+        trailing_stop_tightened: !!dbRow.trailing_stop_tightened,
+        is_scaling_in: !!dbRow.is_scaling_in,
+        entry_snapshot: dbRow.entry_snapshot ? JSON.parse(dbRow.entry_snapshot) : null,
+        management_settings: dbRow.management_settings ? JSON.parse(dbRow.management_settings) : null,
+    };
+};
+
+const prepareTradeForDb = (trade) => {
+    const dbTrade = { ...trade };
+    for (const key of ['is_at_breakeven', 'partial_tp_hit', 'trailing_stop_tightened', 'is_scaling_in']) {
+        dbTrade[key] = dbTrade[key] ? 1 : 0;
+    }
+    for (const key of ['entry_snapshot', 'management_settings']) {
+        if (dbTrade[key]) {
+            dbTrade[key] = JSON.stringify(dbTrade[key]);
+        }
+    }
+    return dbTrade;
+};
+
 
 // --- Auth Helpers ---
 const hashPassword = (password) => {
@@ -248,49 +333,36 @@ const verifyPassword = (password, hash) => {
 
 const loadData = async () => {
     await ensureDataDirs();
+    
+    // 1. Load settings from JSON (as it's config)
     try {
         const settingsContent = await fs.readFile(SETTINGS_FILE_PATH, 'utf-8');
         botState.settings = JSON.parse(settingsContent);
     } catch {
         log("WARN", "settings.json not found. Loading from .env defaults.");
         
-        // Helper for boolean env vars: defaults to `true` unless explicitly 'false'
         const isNotFalse = (envVar) => process.env[envVar] !== 'false';
-        // Helper for boolean env vars: defaults to `false` unless explicitly 'true'
         const isTrue = (envVar) => process.env[envVar] === 'true';
 
         botState.settings = {
-            // Core Trading
             INITIAL_VIRTUAL_BALANCE: parseFloat(process.env.INITIAL_VIRTUAL_BALANCE) || 10000,
             MAX_OPEN_POSITIONS: parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5,
             POSITION_SIZE_PCT: parseFloat(process.env.POSITION_SIZE_PCT) || 2.0,
             RISK_REWARD_RATIO: parseFloat(process.env.RISK_REWARD_RATIO) || 4.0,
-            STOP_LOSS_PCT: parseFloat(process.env.STOP_LOSS_PCT) || 2.0, // Fallback if ATR is disabled
+            STOP_LOSS_PCT: parseFloat(process.env.STOP_LOSS_PCT) || 2.0,
             SLIPPAGE_PCT: parseFloat(process.env.SLIPPAGE_PCT) || 0.05,
-            
-            // Scanner & Filters
             MIN_VOLUME_USD: parseFloat(process.env.MIN_VOLUME_USD) || 40000000,
             SCANNER_DISCOVERY_INTERVAL_SECONDS: parseInt(process.env.SCANNER_DISCOVERY_INTERVAL_SECONDS, 10) || 3600,
             EXCLUDED_PAIRS: process.env.EXCLUDED_PAIRS || "USDCUSDT,FDUSDUSDT,TUSDUSDT,BUSDUSDT",
             LOSS_COOLDOWN_HOURS: parseInt(process.env.LOSS_COOLDOWN_HOURS, 10) || 4,
-            
-            // API Credentials
             BINANCE_API_KEY: process.env.BINANCE_API_KEY || '',
             BINANCE_SECRET_KEY: process.env.BINANCE_SECRET_KEY || '',
-
-            // --- ADVANCED STRATEGY & RISK MANAGEMENT (Optimal Defaults) ---
-            
-            // ATR Stop Loss (Enabled by default)
             USE_ATR_STOP_LOSS: isNotFalse('USE_ATR_STOP_LOSS'),
             ATR_MULTIPLIER: parseFloat(process.env.ATR_MULTIPLIER) || 1.5,
-            
-            // Auto Break-even (Enabled by default)
             USE_AUTO_BREAKEVEN: isNotFalse('USE_AUTO_BREAKEVEN'),
             BREAKEVEN_TRIGGER_R: parseFloat(process.env.BREAKEVEN_TRIGGER_R) || 1.0,
             ADJUST_BREAKEVEN_FOR_FEES: isNotFalse('ADJUST_BREAKEVEN_FOR_FEES'),
             TRANSACTION_FEE_PCT: parseFloat(process.env.TRANSACTION_FEE_PCT) || 0.1,
-
-            // Safety Filters (Enabled by default)
             USE_RSI_SAFETY_FILTER: isNotFalse('USE_RSI_SAFETY_FILTER'),
             RSI_OVERBOUGHT_THRESHOLD: parseInt(process.env.RSI_OVERBOUGHT_THRESHOLD, 10) || 75,
             USE_PARABOLIC_FILTER: isNotFalse('USE_PARABOLIC_FILTER'),
@@ -298,128 +370,100 @@ const loadData = async () => {
             PARABOLIC_FILTER_THRESHOLD_PCT: parseFloat(process.env.PARABOLIC_FILTER_THRESHOLD_PCT) || 2.5,
             USE_VOLUME_CONFIRMATION: isNotFalse('USE_VOLUME_CONFIRMATION'),
             USE_MARKET_REGIME_FILTER: isNotFalse('USE_MARKET_REGIME_FILTER'),
-
-            // Optional Features (Disabled by default for simplicity)
             USE_PARTIAL_TAKE_PROFIT: isTrue('USE_PARTIAL_TAKE_PROFIT'),
             PARTIAL_TP_TRIGGER_PCT: parseFloat(process.env.PARTIAL_TP_TRIGGER_PCT) || 0.8,
             PARTIAL_TP_SELL_QTY_PCT: parseInt(process.env.PARTIAL_TP_SELL_QTY_PCT, 10) || 50,
             USE_DYNAMIC_POSITION_SIZING: isTrue('USE_DYNAMIC_POSITION_SIZING'),
             STRONG_BUY_POSITION_SIZE_PCT: parseFloat(process.env.STRONG_BUY_POSITION_SIZE_PCT) || 3.0,
             REQUIRE_STRONG_BUY: isTrue('REQUIRE_STRONG_BUY'),
-
-            // --- ADAPTIVE BEHAVIOR (Enabled by default) ---
             USE_DYNAMIC_PROFILE_SELECTOR: isNotFalse('USE_DYNAMIC_PROFILE_SELECTOR'),
             ADX_THRESHOLD_RANGE: parseInt(process.env.ADX_THRESHOLD_RANGE, 10) || 20,
             ATR_PCT_THRESHOLD_VOLATILE: parseFloat(process.env.ATR_PCT_THRESHOLD_VOLATILE) || 5.0,
-            USE_AGGRESSIVE_ENTRY_LOGIC: isTrue('USE_AGGRESSIVE_ENTRY_LOGIC'), // Profile-specific
-            
-            // Adaptive Trailing Stop (Enabled by default)
+            USE_AGGRESSIVE_ENTRY_LOGIC: isTrue('USE_AGGRESSIVE_ENTRY_LOGIC'),
             USE_ADAPTIVE_TRAILING_STOP: isNotFalse('USE_ADAPTIVE_TRAILING_STOP'),
             TRAILING_STOP_TIGHTEN_THRESHOLD_R: parseFloat(process.env.TRAILING_STOP_TIGHTEN_THRESHOLD_R) || 1.0,
             TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: parseFloat(process.env.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION) || 0.3,
-
-            // Graduated Circuit Breaker
             CIRCUIT_BREAKER_WARN_THRESHOLD_PCT: parseFloat(process.env.CIRCUIT_BREAKER_WARN_THRESHOLD_PCT) || 1.5,
             CIRCUIT_BREAKER_HALT_THRESHOLD_PCT: parseFloat(process.env.CIRCUIT_BREAKER_HALT_THRESHOLD_PCT) || 2.5,
             DAILY_DRAWDOWN_LIMIT_PCT: parseFloat(process.env.DAILY_DRAWDOWN_LIMIT_PCT) || 3.0,
             CONSECUTIVE_LOSS_LIMIT: parseInt(process.env.CONSECUTIVE_LOSS_LIMIT, 10) || 5,
-
-            // --- ADVANCED ENTRY CONFIRMATION ---
             USE_MTF_VALIDATION: isTrue('USE_MTF_VALIDATION'),
             USE_OBV_VALIDATION: isNotFalse('USE_OBV_VALIDATION'),
             USE_CVD_FILTER: isTrue('USE_CVD_FILTER'),
-            
-            // --- NEW ADVANCED CONFIRMATION FILTERS ---
             USE_RSI_MTF_FILTER: isTrue('USE_RSI_MTF_FILTER'),
             RSI_15M_OVERBOUGHT_THRESHOLD: parseInt(process.env.RSI_15M_OVERBOUGHT_THRESHOLD, 10) || 70,
             USE_WICK_DETECTION_FILTER: isTrue('USE_WICK_DETECTION_FILTER'),
             MAX_UPPER_WICK_PCT: parseFloat(process.env.MAX_UPPER_WICK_PCT) || 50,
             USE_OBV_5M_VALIDATION: isTrue('USE_OBV_5M_VALIDATION'),
-            
-            // --- PORTFOLIO INTELLIGENCE ---
             SCALING_IN_CONFIG: process.env.SCALING_IN_CONFIG || "50,50",
             MAX_CORRELATED_TRADES: parseInt(process.env.MAX_CORRELATED_TRADES, 10) || 2,
             USE_FEAR_AND_GREED_FILTER: isTrue('USE_FEAR_AND_GREED_FILTER'),
-
-            // --- ADVANCED PORTFOLIO FILTERS ---
             USE_ORDER_BOOK_LIQUIDITY_FILTER: isTrue('USE_ORDER_BOOK_LIQUIDITY_FILTER'),
             MIN_ORDER_BOOK_LIQUIDITY_USD: parseInt(process.env.MIN_ORDER_BOOK_LIQUIDITY_USD, 10) || 200000,
             USE_SECTOR_CORRELATION_FILTER: isTrue('USE_SECTOR_CORRELATION_FILTER'),
             USE_WHALE_MANIPULATION_FILTER: isTrue('USE_WHALE_MANIPULATION_FILTER'),
             WHALE_SPIKE_THRESHOLD_PCT: parseFloat(process.env.WHALE_SPIKE_THRESHOLD_PCT) || 5.0,
-
-            // --- EXPERIMENTAL STRATEGIES ---
             USE_IGNITION_STRATEGY: isTrue('USE_IGNITION_STRATEGY'),
             IGNITION_PRICE_THRESHOLD_PCT: parseFloat(process.env.IGNITION_PRICE_THRESHOLD_PCT) || 5.0,
             IGNITION_VOLUME_MULTIPLIER: parseInt(process.env.IGNITION_VOLUME_MULTIPLIER, 10) || 10,
             USE_FLASH_TRAILING_STOP: isTrue('USE_FLASH_TRAILING_STOP'),
             FLASH_TRAILING_STOP_PCT: parseFloat(process.env.FLASH_TRAILING_STOP_PCT) || 1.5,
         };
-        await saveData('settings');
-    }
-    try {
-        const stateContent = await fs.readFile(STATE_FILE_PATH, 'utf-8');
-        const persistedState = JSON.parse(stateContent);
-        botState.balance = persistedState.balance || botState.settings.INITIAL_VIRTUAL_BALANCE;
-        botState.activePositions = persistedState.activePositions || [];
-        botState.tradeHistory = persistedState.tradeHistory || [];
-        botState.tradeIdCounter = persistedState.tradeIdCounter || 1;
-        botState.isRunning = persistedState.isRunning !== undefined ? persistedState.isRunning : true;
-        botState.tradingMode = persistedState.tradingMode || 'VIRTUAL';
-        botState.dayStartBalance = persistedState.dayStartBalance || botState.settings.INITIAL_VIRTUAL_BALANCE;
-        botState.dailyPnl = persistedState.dailyPnl || 0;
-        botState.consecutiveLosses = persistedState.consecutiveLosses || 0;
-        botState.consecutiveWins = persistedState.consecutiveWins || 0;
-        botState.currentTradingDay = persistedState.currentTradingDay || new Date().toISOString().split('T')[0];
-    } catch {
-        log("WARN", "state.json not found. Initializing default state.");
-        botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
-        botState.dayStartBalance = botState.settings.INITIAL_VIRTUAL_BALANCE;
-        await saveData('state');
+        await fs.writeFile(SETTINGS_FILE_PATH, JSON.stringify(botState.settings, null, 2));
     }
 
+    // 2. Initialize DB connection
+    await initDb();
+    
+    // 3. Initialize key-value store with defaults if they don't exist
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('balance', ?)", botState.settings.INITIAL_VIRTUAL_BALANCE.toString());
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('isRunning', 'true')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('tradingMode', 'VIRTUAL')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('dayStartBalance', ?)", botState.settings.INITIAL_VIRTUAL_BALANCE.toString());
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('dailyPnl', '0')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('consecutiveLosses', '0')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('consecutiveWins', '0')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('currentTradingDay', ?)", new Date().toISOString().split('T')[0]);
+
+    // 4. Load state from DB into memory
+    botState.balance = parseFloat(await getKeyValue('balance'));
+    botState.isRunning = (await getKeyValue('isRunning')) === 'true';
+    botState.tradingMode = await getKeyValue('tradingMode');
+    botState.dayStartBalance = parseFloat(await getKeyValue('dayStartBalance'));
+    botState.dailyPnl = parseFloat(await getKeyValue('dailyPnl'));
+    botState.consecutiveLosses = parseInt(await getKeyValue('consecutiveLosses'), 10);
+    botState.consecutiveWins = parseInt(await getKeyValue('consecutiveWins'), 10);
+    botState.currentTradingDay = await getKeyValue('currentTradingDay');
+
+    const allTrades = await db.all('SELECT * FROM trades');
+    botState.activePositions = allTrades.filter(t => t.status !== 'CLOSED').map(parseDbTrade);
+    botState.tradeHistory = allTrades.filter(t => t.status === 'CLOSED').map(parseDbTrade);
+    log('INFO', `Loaded ${botState.activePositions.length} active positions and ${botState.tradeHistory.length} historical trades from DB.`);
+
+
+    // 5. Load auth from JSON
     try {
         const authContent = await fs.readFile(AUTH_FILE_PATH, 'utf-8');
-        const authData = JSON.parse(authContent);
-        if (authData.passwordHash) {
-            botState.passwordHash = authData.passwordHash;
-        } else {
-            throw new Error("Invalid auth file format");
-        }
+        botState.passwordHash = JSON.parse(authContent).passwordHash;
     } catch {
-        log("WARN", "auth.json not found or invalid. Initializing from .env.");
+        log("WARN", "auth.json not found. Initializing from .env.");
         const initialPassword = process.env.APP_PASSWORD;
         if (!initialPassword) {
-            log('ERROR', 'CRITICAL: APP_PASSWORD is not set in .env file. Please set it and restart.');
+            log('ERROR', 'CRITICAL: APP_PASSWORD is not set in .env. Please set it and restart.');
             process.exit(1);
         }
         botState.passwordHash = await hashPassword(initialPassword);
         await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ passwordHash: botState.passwordHash }, null, 2));
-        log('INFO', 'Created auth.json with a new secure password hash.');
     }
     
     realtimeAnalyzer.updateSettings(botState.settings);
 };
 
 const saveData = async (type) => {
+    // This function is now only for settings and auth, state is saved directly to DB.
     await ensureDataDirs();
     if (type === 'settings') {
         await fs.writeFile(SETTINGS_FILE_PATH, JSON.stringify(botState.settings, null, 2));
-    } else if (type === 'state') {
-        const stateToPersist = {
-            balance: botState.balance,
-            activePositions: botState.activePositions,
-            tradeHistory: botState.tradeHistory,
-            tradeIdCounter: botState.tradeIdCounter,
-            isRunning: botState.isRunning,
-            tradingMode: botState.tradingMode,
-            dayStartBalance: botState.dayStartBalance,
-            dailyPnl: botState.dailyPnl,
-            consecutiveLosses: botState.consecutiveLosses,
-            consecutiveWins: botState.consecutiveWins,
-            currentTradingDay: botState.currentTradingDay,
-        };
-        await fs.writeFile(STATE_FILE_PATH, JSON.stringify(stateToPersist, null, 2));
     } else if (type === 'auth') {
         await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ passwordHash: botState.passwordHash }, null, 2));
     }
@@ -849,7 +893,8 @@ class RealtimeAnalyzer {
 
     async handleNewKline(symbol, interval, kline) {
         if(symbol === 'BTCUSDT' && interval === '1m' && kline.closeTime) {
-            checkGlobalSafetyRules();
+            // FIX: The function checkGlobalSafetyRules is async and must be awaited.
+            await checkGlobalSafetyRules();
         }
 
         log('BINANCE_WS', `[${interval} KLINE] Received for ${symbol}. Close: ${kline.close}`);
@@ -1102,18 +1147,17 @@ const getSymbolSector = (symbol) => {
 let botState = {
     settings: {},
     balance: 10000,
-    activePositions: [],
-    tradeHistory: [],
-    tradeIdCounter: 1,
-    scannerCache: [], // Holds the latest state of all scanned pairs
+    activePositions: [], // In-memory cache of active positions from DB
+    tradeHistory: [], // In-memory cache of historical trades from DB
+    scannerCache: [],
     isRunning: true,
-    tradingMode: 'VIRTUAL', // VIRTUAL, REAL_PAPER, REAL_LIVE
+    tradingMode: 'VIRTUAL',
     passwordHash: '',
-    recentlyLostSymbols: new Map(), // symbol -> { until: timestamp }
-    hotlist: new Set(), // Symbols ready for 1m precision entry
-    pendingConfirmation: new Map(), // symbol -> { triggerPrice, triggerTimestamp, slPriceReference, settings }
-    priceCache: new Map(), // symbol -> { price: number }
-    circuitBreakerStatus: 'NONE', // NONE, WARNING_BTC_DROP, HALTED_BTC_DROP, HALTED_DRAWDOWN, PAUSED_LOSS_STREAK, PAUSED_EXTREME_SENTIMENT
+    recentlyLostSymbols: new Map(),
+    hotlist: new Set(),
+    pendingConfirmation: new Map(),
+    priceCache: new Map(),
+    circuitBreakerStatus: 'NONE',
     dayStartBalance: 10000,
     dailyPnl: 0,
     consecutiveLosses: 0,
@@ -1392,7 +1436,7 @@ const tradingEngine = {
         const takeProfit = entryPrice + (riskPerUnit * tradeSettings.RISK_REWARD_RATIO);
         
         const newTrade = {
-            id: botState.tradeIdCounter++,
+            id: null, // DB will assign ID
             mode: botState.tradingMode,
             symbol: pair.symbol,
             side: 'BUY',
@@ -1402,11 +1446,11 @@ const tradingEngine = {
             target_quantity: target_quantity,
             total_cost_usd: initial_cost,
             stop_loss: stopLoss,
-            initial_stop_loss: stopLoss, // Store initial SL for R calculation
+            initial_stop_loss: stopLoss,
             take_profit: takeProfit,
             highest_price_since_entry: entryPrice,
             entry_time: new Date().toISOString(),
-            status: 'FILLED', // Assume fill for both virtual and real (since it's a market order)
+            status: 'FILLED',
             entry_snapshot: { ...pair },
             is_at_breakeven: false,
             partial_tp_hit: false,
@@ -1434,14 +1478,22 @@ const tradingEngine = {
             }
         };
 
-        log('TRADE', `>>> TRADE OPENED (STRATEGY: ${newTrade.strategy_type || 'N/A'}, ENTRY 1/${newTrade.total_entries}) <<< Opening ${botState.tradingMode} trade for ${pair.symbol}: Qty=${initial_quantity.toFixed(4)}, Entry=$${entryPrice}`);
-        
+        const dbTrade = prepareTradeForDb(newTrade);
+        const { id, ...dbTradeToInsert } = dbTrade; // Exclude null id
+        const columns = Object.keys(dbTradeToInsert).join(', ');
+        const placeholders = Object.keys(dbTradeToInsert).map(() => '?').join(', ');
+
+        const result = await db.run(`INSERT INTO trades (${columns}) VALUES (${placeholders})`, Object.values(dbTradeToInsert));
+        newTrade.id = result.lastID;
         botState.activePositions.push(newTrade);
+        
         if (botState.tradingMode === 'VIRTUAL') {
             botState.balance -= initial_cost;
+            await setKeyValue('balance', botState.balance);
         }
+
+        log('TRADE', `>>> TRADE OPENED (ID: ${newTrade.id}, STRATEGY: ${newTrade.strategy_type || 'N/A'}, ENTRY 1/${newTrade.total_entries}) <<< Opening ${botState.tradingMode} trade for ${pair.symbol}: Qty=${initial_quantity.toFixed(4)}, Entry=$${entryPrice}`);
         
-        saveData('state');
         broadcast({ type: 'POSITIONS_UPDATED' });
         return true;
     },
@@ -1465,6 +1517,7 @@ const tradingEngine = {
             } catch (error) {
                 log('ERROR', `[REAL_LIVE] FAILED to scale in for ${position.symbol}. Error: ${error.message}. Stopping scale-in for this trade.`);
                 position.is_scaling_in = false;
+                await db.run('UPDATE trades SET is_scaling_in = 0 WHERE id = ?', position.id);
                 return;
             }
         }
@@ -1473,7 +1526,8 @@ const tradingEngine = {
 
         if (botState.tradingMode === 'VIRTUAL' && botState.balance < chunkCost) {
             log('WARN', `[SCALING IN] Insufficient virtual balance to scale in for ${position.symbol}.`);
-            position.is_scaling_in = false; // Stop trying to scale in
+            position.is_scaling_in = false;
+            await db.run('UPDATE trades SET is_scaling_in = 0 WHERE id = ?', position.id);
             return;
         }
 
@@ -1487,24 +1541,28 @@ const tradingEngine = {
         
         if (botState.tradingMode === 'VIRTUAL') {
             botState.balance -= chunkCost;
+            await setKeyValue('balance', botState.balance);
         }
 
-        // Recalculate Take Profit based on new average entry price
         const riskPerUnit = position.average_entry_price - position.initial_stop_loss;
         position.take_profit = position.average_entry_price + (riskPerUnit * tradeSettings.RISK_REWARD_RATIO);
-
-        log('TRADE', `[SCALING IN] Entry ${position.current_entry_count}/${position.total_entries} for ${position.symbol} at $${newPrice}. New Avg Price: $${position.average_entry_price.toFixed(4)}`);
 
         if (position.current_entry_count >= position.total_entries) {
             position.is_scaling_in = false;
             log('TRADE', `[SCALING IN] Final entry for ${position.symbol} complete.`);
         }
+        
+        await db.run(
+            'UPDATE trades SET average_entry_price = ?, quantity = ?, total_cost_usd = ?, current_entry_count = ?, take_profit = ?, is_scaling_in = ? WHERE id = ?',
+            position.average_entry_price, position.quantity, position.total_cost_usd, position.current_entry_count, position.take_profit, position.is_scaling_in ? 1 : 0, position.id
+        );
 
-        saveData('state');
+        log('TRADE', `[SCALING IN] Entry ${position.current_entry_count}/${position.total_entries} for ${position.symbol} at $${newPrice}. New Avg Price: $${position.average_entry_price.toFixed(4)}`);
+        
         broadcast({ type: 'POSITIONS_UPDATED' });
     },
 
-    monitorAndManagePositions() {
+    async monitorAndManagePositions() {
         if (!botState.isRunning) return;
 
         // Check for timed-out pending confirmations
@@ -1522,50 +1580,46 @@ const tradingEngine = {
             }
         }
 
-
         const positionsToClose = [];
-        botState.activePositions.forEach(pos => {
+        for (const pos of botState.activePositions) {
             const priceData = botState.priceCache.get(pos.symbol);
             if (!priceData) {
                 log('WARN', `No price data available for active position ${pos.symbol}. Skipping management check.`);
-                return;
+                continue;
             }
 
-            // Use trade-specific settings with a fallback to global settings for safety/backwards compatibility
             const s = pos.management_settings || botState.settings;
-
             const currentPrice = priceData.price;
+            let changes = {};
+
             if (currentPrice > pos.highest_price_since_entry) {
                 pos.highest_price_since_entry = currentPrice;
+                changes.highest_price_since_entry = currentPrice;
             }
 
             if (currentPrice <= pos.stop_loss) {
                 positionsToClose.push({ trade: pos, exitPrice: pos.stop_loss, reason: 'Stop Loss' });
-                return;
+                continue;
             }
 
             if (currentPrice >= pos.take_profit) {
                 positionsToClose.push({ trade: pos, exitPrice: pos.take_profit, reason: 'Take Profit' });
-                return;
+                continue;
             }
             
-            // --- R-Multiple Calculation ---
             let currentR = 0;
             if (pos.initial_stop_loss) {
                 const initialRiskPerUnit = pos.average_entry_price - pos.initial_stop_loss;
                 if (initialRiskPerUnit > 0) {
-                    const currentProfitPerUnit = currentPrice - pos.average_entry_price;
-                    currentR = currentProfitPerUnit / initialRiskPerUnit;
+                    currentR = (currentPrice - pos.average_entry_price) / initialRiskPerUnit;
                 }
             }
-
-            // --- Partial Take Profit (remains Pct-based as per current implementation) ---
+            
             const pnlPct = ((currentPrice - pos.average_entry_price) / pos.average_entry_price) * 100;
             if (s.USE_PARTIAL_TAKE_PROFIT && !pos.partial_tp_hit && pnlPct >= s.PARTIAL_TP_TRIGGER_PCT) {
-                this.executePartialSell(pos, currentPrice, s);
+                await this.executePartialSell(pos, currentPrice, s); // This now updates DB
             }
 
-            // --- R-Based Auto Break-even ---
             if (s.USE_AUTO_BREAKEVEN && !pos.is_at_breakeven && currentR >= s.BREAKEVEN_TRIGGER_R) {
                 let newStopLoss = pos.average_entry_price;
                 if (s.ADJUST_BREAKEVEN_FOR_FEES && s.TRANSACTION_FEE_PCT > 0) {
@@ -1573,48 +1627,47 @@ const tradingEngine = {
                 }
                 pos.stop_loss = newStopLoss;
                 pos.is_at_breakeven = true;
-                log('TRADE', `[${pos.symbol}] Profit at ${currentR.toFixed(2)}R. Stop Loss moved to Break-even at $${newStopLoss.toFixed(4)}.`);
+                changes = {...changes, stop_loss: newStopLoss, is_at_breakeven: 1 };
+                log('TRADE', `[${pos.symbol}] Profit at ${currentR.toFixed(2)}R. SL moved to Break-even at $${newStopLoss.toFixed(4)}.`);
             }
             
-            // --- Flash Trailing Stop for Ignition Trades (Overrides other trailing logic) ---
             if (pos.strategy_type === 'IGNITION' && s.USE_FLASH_TRAILING_STOP) {
                 const newTrailingSL = pos.highest_price_since_entry * (1 - s.FLASH_TRAILING_STOP_PCT / 100);
                 if (newTrailingSL > pos.stop_loss) {
                     pos.stop_loss = newTrailingSL;
+                    changes.stop_loss = newTrailingSL;
                 }
-                return; // IMPORTANT: Skip other trailing logic if flash stop is active
-            }
-
-            // --- R-Based Adaptive Trailing Stop ---
-            // This logic activates AFTER break-even is hit.
-            if (s.USE_ADAPTIVE_TRAILING_STOP && pos.is_at_breakeven && pos.entry_snapshot?.atr_15m) {
+            } else if (s.USE_ADAPTIVE_TRAILING_STOP && pos.is_at_breakeven && pos.entry_snapshot?.atr_15m) {
                 let atrMultiplier = s.ATR_MULTIPLIER;
                 
-                // Check if we should tighten the multiplier
                 if (currentR >= s.TRAILING_STOP_TIGHTEN_THRESHOLD_R) {
                     if (!pos.trailing_stop_tightened) {
                         atrMultiplier -= s.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION;
-                        pos.trailing_stop_tightened = true; // Mark as tightened
+                        pos.trailing_stop_tightened = true;
+                        changes.trailing_stop_tightened = 1;
                         log('TRADE', `[${pos.symbol}] Adaptive SL: Profit > ${s.TRAILING_STOP_TIGHTEN_THRESHOLD_R}R. Tightening ATR multiplier to ${atrMultiplier.toFixed(2)}.`);
                     } else {
-                        // It's already tightened, so just use the reduced multiplier
                          atrMultiplier -= s.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION;
                     }
                 }
                 
                 const newTrailingSL = pos.highest_price_since_entry - (pos.entry_snapshot.atr_15m * atrMultiplier);
-                
                 if (newTrailingSL > pos.stop_loss) {
                     pos.stop_loss = newTrailingSL;
+                    changes.stop_loss = newTrailingSL;
                 }
             }
-        });
+            
+            if (Object.keys(changes).length > 0) {
+                const setClauses = Object.keys(changes).map(k => `${k} = ?`).join(', ');
+                await db.run(`UPDATE trades SET ${setClauses} WHERE id = ?`, [...Object.values(changes), pos.id]);
+            }
+        }
 
         if (positionsToClose.length > 0) {
-            positionsToClose.forEach(async ({ trade, exitPrice, reason }) => {
+            for (const { trade, exitPrice, reason } of positionsToClose) {
                 await this.closeTrade(trade.id, exitPrice, reason);
-            });
-            saveData('state');
+            }
             broadcast({ type: 'POSITIONS_UPDATED' });
         }
     },
@@ -1622,43 +1675,32 @@ const tradingEngine = {
     async closeTrade(tradeId, exitPrice, reason = 'Manual Close') {
         const tradeIndex = botState.activePositions.findIndex(t => t.id === tradeId);
         if (tradeIndex === -1) {
-            log('WARN', `Could not find trade with ID ${tradeId} to close.`);
+            log('WARN', `Could not find active trade with ID ${tradeId} to close.`);
             return null;
         }
+        let trade = botState.activePositions[tradeIndex];
 
-        const trade = botState.activePositions[tradeIndex];
-
-        // --- REAL TRADE EXECUTION ---
         if (trade.mode === 'REAL_LIVE') {
             if (!binanceApiClient) {
-                log('ERROR', `[REAL_LIVE] Cannot close trade for ${trade.symbol}. Binance API client not initialized.`);
-                // CRITICAL: DO NOT close the position internally if the API client is down.
+                log('ERROR', `[REAL_LIVE] Cannot close trade for ${trade.symbol}. API client not initialized.`);
                 return null;
             }
             try {
                 const formattedQty = formatQuantity(trade.symbol, trade.quantity);
-                log('TRADE', `>>> [REAL_LIVE] CLOSING TRADE <<< Attempting to SELL ${formattedQty} ${trade.symbol} at MARKET price.`);
+                log('TRADE', `>>> [REAL_LIVE] CLOSING TRADE <<< Selling ${formattedQty} ${trade.symbol} at MARKET.`);
                 const orderResult = await binanceApiClient.createOrder(trade.symbol, 'SELL', 'MARKET', formattedQty);
-                log('BINANCE_API', `[REAL_LIVE] Close order successful for ${trade.symbol}. Order ID: ${orderResult.orderId}`);
+                log('BINANCE_API', `[REAL_LIVE] Close order successful for ${trade.symbol}. ID: ${orderResult.orderId}`);
                 
-                // === BUG FIX: Use actual average fill price instead of first fill ===
-                const executedQty = parseFloat(orderResult.executedQty);
-                if (executedQty > 0) {
-                    const cummulativeQuoteQty = parseFloat(orderResult.cummulativeQuoteQty);
-                    exitPrice = cummulativeQuoteQty / executedQty;
+                if (parseFloat(orderResult.executedQty) > 0) {
+                    exitPrice = parseFloat(orderResult.cummulativeQuoteQty) / parseFloat(orderResult.executedQty);
                     log('TRADE', `[REAL_LIVE] Actual average exit price for ${trade.symbol} is $${exitPrice.toFixed(4)}.`);
-                } else {
-                    log('ERROR', `[REAL_LIVE] Close order for ${trade.symbol} was successful but executed quantity is zero. Manual check required.`);
                 }
-
             } catch (error) {
-                 log('ERROR', `[REAL_LIVE] FAILED to place closing order for ${trade.symbol}. Error: ${error.message}. THE POSITION REMAINS OPEN ON BINANCE AND IN THE BOT. MANUAL INTERVENTION REQUIRED.`);
-                // CRITICAL: Do not proceed with internal closing logic if the real order fails.
+                 log('ERROR', `[REAL_LIVE] FAILED to place closing order for ${trade.symbol}. Error: ${error.message}. MANUAL INTERVENTION REQUIRED.`);
                 return null;
             }
         }
         
-        // --- Internal State Update (only after successful real close, or for virtual modes) ---
         botState.activePositions.splice(tradeIndex, 1);
         
         trade.exit_price = exitPrice;
@@ -1667,22 +1709,24 @@ const tradingEngine = {
 
         const exitValue = exitPrice * trade.quantity;
         const pnl = (trade.realized_pnl || 0) + exitValue - trade.total_cost_usd;
-        
         const initialFullPositionValue = trade.average_entry_price * trade.target_quantity;
 
         trade.pnl = pnl;
-        trade.pnl_pct = (pnl / initialFullPositionValue) * 100;
+        trade.pnl_pct = initialFullPositionValue > 0 ? (pnl / initialFullPositionValue) * 100 : 0;
+
+        await db.run(
+            'UPDATE trades SET status = ?, exit_price = ?, exit_time = ?, pnl = ?, pnl_pct = ? WHERE id = ?',
+            'CLOSED', trade.exit_price, trade.exit_time, trade.pnl, trade.pnl_pct, trade.id
+        );
 
         if (trade.mode === 'VIRTUAL') {
             botState.balance += trade.total_cost_usd + pnl;
+            await setKeyValue('balance', botState.balance);
         } else {
-             // For REAL modes, the balance should be re-fetched from Binance periodically,
-             // but we can update it optimistically for immediate UI feedback.
-             // A full balance sync should happen after a trade.
-             botState.balance += pnl; // Approximate update
+             botState.balance += pnl;
+             await setKeyValue('balance', botState.balance);
         }
         
-        // --- Daily Stats Update ---
         const today = new Date().toISOString().split('T')[0];
         if (today !== botState.currentTradingDay) {
             log('INFO', `New trading day. Resetting daily stats. Previous day PnL: $${botState.dailyPnl.toFixed(2)}`);
@@ -1690,8 +1734,13 @@ const tradingEngine = {
             botState.consecutiveLosses = 0;
             botState.consecutiveWins = 0;
             botState.currentTradingDay = today;
-            botState.dayStartBalance = botState.balance; // Set new day's starting balance
-            
+            botState.dayStartBalance = botState.balance;
+            await setKeyValue('dailyPnl', 0);
+            await setKeyValue('consecutiveLosses', 0);
+            await setKeyValue('consecutiveWins', 0);
+            await setKeyValue('currentTradingDay', today);
+            await setKeyValue('dayStartBalance', botState.balance);
+
             if (botState.circuitBreakerStatus === 'HALTED_DRAWDOWN') {
                 botState.circuitBreakerStatus = 'NONE';
                 broadcast({ type: 'CIRCUIT_BREAKER_UPDATE', payload: { status: 'NONE' } });
@@ -1699,6 +1748,7 @@ const tradingEngine = {
         }
 
         botState.dailyPnl += pnl;
+        await setKeyValue('dailyPnl', botState.dailyPnl);
 
         if (pnl < 0) {
             botState.consecutiveLosses++;
@@ -1711,9 +1761,11 @@ const tradingEngine = {
                 botState.circuitBreakerStatus = 'NONE';
             }
         }
+        await setKeyValue('consecutiveLosses', botState.consecutiveLosses);
+        await setKeyValue('consecutiveWins', botState.consecutiveWins);
         
-        checkGlobalSafetyRules();
-        
+        // FIX: The function checkGlobalSafetyRules is async and must be awaited.
+        await checkGlobalSafetyRules();
         botState.tradeHistory.push(trade);
         
         if (pnl < 0 && botState.settings.LOSS_COOLDOWN_HOURS > 0) {
@@ -1726,14 +1778,10 @@ const tradingEngine = {
         return trade;
     },
     
-    executePartialSell(position, currentPrice, settings) {
-        // Note: Real partial sells are not implemented for simplicity.
-        // This logic only applies to VIRTUAL mode.
+    async executePartialSell(position, currentPrice, settings) {
         if (position.mode !== 'VIRTUAL') return;
 
-        const s = settings;
-        const initialQty = position.target_quantity;
-        const sellQty = initialQty * (s.PARTIAL_TP_SELL_QTY_PCT / 100);
+        const sellQty = position.target_quantity * (settings.PARTIAL_TP_SELL_QTY_PCT / 100);
         const pnlFromSale = (currentPrice - position.average_entry_price) * sellQty;
 
         position.quantity -= sellQty;
@@ -1741,33 +1789,30 @@ const tradingEngine = {
         position.realized_pnl = (position.realized_pnl || 0) + pnlFromSale;
         position.partial_tp_hit = true;
         
-        log('TRADE', `[PARTIAL TP] Sold ${s.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${currentPrice}. Realized PnL: $${pnlFromSale.toFixed(2)}`);
+        await db.run(
+            'UPDATE trades SET quantity = ?, total_cost_usd = ?, realized_pnl = ?, partial_tp_hit = 1 WHERE id = ?',
+            position.quantity, position.total_cost_usd, position.realized_pnl, position.id
+        );
+        log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${currentPrice}. Realized PnL: $${pnlFromSale.toFixed(2)}`);
     }
 };
 
-const checkGlobalSafetyRules = () => {
+// FIX: This function uses await and must be declared async.
+const checkGlobalSafetyRules = async () => {
     const s = botState.settings;
     let newStatus = botState.circuitBreakerStatus;
     let statusReason = "";
 
-    // If already halted for a major reason, don't change it to a lesser warning.
-    if (newStatus === 'HALTED_BTC_DROP' || newStatus === 'HALTED_DRAWDOWN') {
-        return; 
-    }
+    if (newStatus === 'HALTED_BTC_DROP' || newStatus === 'HALTED_DRAWDOWN') return; 
 
-    // Rule 1: Daily Drawdown Limit (Highest Priority Halt)
     const drawdownLimitUSD = (botState.dayStartBalance * (s.DAILY_DRAWDOWN_LIMIT_PCT / 100));
     if (botState.dailyPnl < 0 && Math.abs(botState.dailyPnl) >= drawdownLimitUSD) {
         newStatus = 'HALTED_DRAWDOWN';
         statusReason = `Daily drawdown limit of -$${drawdownLimitUSD.toFixed(2)} reached. Trading halted for the day.`;
-    }
-    // Rule 2: Consecutive Loss Limit (Pause)
-    else if (botState.consecutiveLosses >= s.CONSECUTIVE_LOSS_LIMIT) {
+    } else if (botState.consecutiveLosses >= s.CONSECUTIVE_LOSS_LIMIT) {
         newStatus = 'PAUSED_LOSS_STREAK';
         statusReason = `${s.CONSECUTIVE_LOSS_LIMIT} consecutive losses reached. Trading is paused.`;
-    }
-    // Rule 3: Extreme Market Sentiment (Pause)
-    else if (s.USE_FEAR_AND_GREED_FILTER && botState.fearAndGreed) {
+    } else if (s.USE_FEAR_AND_GREED_FILTER && botState.fearAndGreed) {
         if (botState.fearAndGreed.value <= 15 || botState.fearAndGreed.value >= 85) {
             newStatus = 'PAUSED_EXTREME_SENTIMENT';
             statusReason = `Extreme market sentiment detected (F&G: ${botState.fearAndGreed.value}). Trading paused.`;
@@ -1775,10 +1820,7 @@ const checkGlobalSafetyRules = () => {
             newStatus = 'NONE';
             statusReason = 'Market sentiment has returned to normal levels.';
         }
-    }
-    // Rule 4: BTC Price Drop (Existing logic)
-    // Only check this if no other halt/pause is active yet from this check
-    else {
+    } else {
         const btcKlines1m = realtimeAnalyzer.klineData.get('BTCUSDT')?.get('1m');
         if (btcKlines1m && btcKlines1m.length >= 5) {
             const periodKlines = btcKlines1m.slice(-5);
@@ -1793,7 +1835,6 @@ const checkGlobalSafetyRules = () => {
                 newStatus = 'WARNING_BTC_DROP';
                  statusReason = `BTC drop of ${dropPct.toFixed(2)}% exceeded WARN threshold.`;
             } else {
-                // If we were in a BTC warning and now we are not, reset to NONE.
                 if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP') {
                     newStatus = 'NONE';
                     statusReason = 'BTC price stabilized.';
@@ -1811,12 +1852,11 @@ const checkGlobalSafetyRules = () => {
             const positionsToClose = [...botState.activePositions];
             if (positionsToClose.length > 0) {
                 log('ERROR', `Closing ${positionsToClose.length} open positions due to Circuit Breaker HALT (BTC DROP).`);
-                positionsToClose.forEach(async pos => {
+                for (const pos of positionsToClose) {
                     const priceData = botState.priceCache.get(pos.symbol);
                     const exitPrice = priceData ? priceData.price : pos.entry_price;
                     await tradingEngine.closeTrade(pos.id, exitPrice, 'Circuit Breaker');
-                });
-                saveData('state');
+                }
                 broadcast({ type: 'POSITIONS_UPDATED' });
             }
         }
@@ -1826,20 +1866,15 @@ const checkGlobalSafetyRules = () => {
 const fetchFearAndGreedIndex = async () => {
     try {
         const response = await fetch('https://api.alternative.me/fng/?limit=1');
-        if (!response.ok) {
-            throw new Error(`API returned status ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`API returned status ${response.status}`);
         const data = await response.json();
-        if (data && data.data && data.data.length > 0) {
+        if (data?.data?.[0]) {
             const fng = data.data[0];
-            const fngData = {
-                value: parseInt(fng.value, 10),
-                classification: fng.value_classification,
-            };
+            const fngData = { value: parseInt(fng.value, 10), classification: fng.value_classification };
             botState.fearAndGreed = fngData;
             broadcast({ type: 'FEAR_AND_GREED_UPDATE', payload: fngData });
-            // After updating, check the rules
-            checkGlobalSafetyRules();
+            // FIX: The function checkGlobalSafetyRules is async and must be awaited.
+            await checkGlobalSafetyRules();
         }
     } catch (error) {
         log('ERROR', `Failed to fetch Fear & Greed Index: ${error.message}`);
@@ -1857,7 +1892,6 @@ const startBot = async () => {
             exchangeInfo.symbols.forEach(s => {
                 const lotSizeFilter = s.filters.find(f => f.filterType === 'LOT_SIZE');
                 const minNotionalFilter = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
-                
                 symbolRules.set(s.symbol, {
                     stepSize: lotSizeFilter ? parseFloat(lotSizeFilter.stepSize) : 1,
                     minNotional: minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5.0
@@ -1869,7 +1903,6 @@ const startBot = async () => {
         }
     }
 
-    // Initial scan, then set interval
     runScannerCycle(); 
     scannerInterval = setInterval(runScannerCycle, botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS * 1000);
     
@@ -1877,11 +1910,10 @@ const startBot = async () => {
         if (botState.isRunning) {
             tradingEngine.monitorAndManagePositions();
         }
-    }, 1000); // Manage positions every second for high-frequency checks
+    }, 1000);
     
-    // Fetch Fear & Greed index periodically
     fetchFearAndGreedIndex();
-    setInterval(fetchFearAndGreedIndex, 15 * 60 * 1000); // Every 15 minutes
+    setInterval(fetchFearAndGreedIndex, 15 * 60 * 1000);
 
     connectToBinanceStreams();
     log('INFO', 'Bot started. Initializing scanner and position manager...');
@@ -1889,7 +1921,7 @@ const startBot = async () => {
 
 // --- API Endpoints ---
 const requireAuth = (req, res, next) => {
-    if (req.session && req.session.isAuthenticated) {
+    if (req.session?.isAuthenticated) {
         next();
     } else {
         res.status(401).json({ message: 'Unauthorized' });
@@ -1915,20 +1947,14 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/api/logout', (req, res) => {
     req.session.destroy(err => {
-        if (err) {
-            return res.status(500).json({ message: 'Could not log out.' });
-        }
+        if (err) return res.status(500).json({ message: 'Could not log out.' });
         res.clearCookie('connect.sid');
         res.status(204).send();
     });
 });
 
 app.get('/api/check-session', (req, res) => {
-    if (req.session && req.session.isAuthenticated) {
-        res.json({ isAuthenticated: true });
-    } else {
-        res.json({ isAuthenticated: false });
-    }
+    res.json({ isAuthenticated: !!req.session?.isAuthenticated });
 });
 
 app.post('/api/change-password', requireAuth, async (req, res) => {
@@ -1955,35 +1981,27 @@ app.get('/api/settings', requireAuth, (req, res) => {
 
 app.post('/api/settings', requireAuth, async (req, res) => {
     const oldSettings = { ...botState.settings };
-    
-    // Update settings in memory
     botState.settings = { ...botState.settings, ...req.body };
     
-    // If virtual balance setting is changed while in VIRTUAL mode, update the current balance.
     if (botState.tradingMode === 'VIRTUAL' && botState.settings.INITIAL_VIRTUAL_BALANCE !== oldSettings.INITIAL_VIRTUAL_BALANCE) {
         botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
-        log('INFO', `Virtual balance was adjusted to match new setting: $${botState.balance}`);
-        await saveData('state'); // Persist the new balance
-        // Trigger a refresh on the frontend to show the new balance.
+        await setKeyValue('balance', botState.balance);
+        log('INFO', `Virtual balance adjusted to: $${botState.balance}`);
         broadcast({ type: 'POSITIONS_UPDATED' });
     }
 
     await saveData('settings');
     realtimeAnalyzer.updateSettings(botState.settings);
     
-    // If API keys change, re-initialize the client
     if (botState.settings.BINANCE_API_KEY !== oldSettings.BINANCE_API_KEY || botState.settings.BINANCE_SECRET_KEY !== oldSettings.BINANCE_SECRET_KEY) {
         log('INFO', 'Binance API keys updated. Re-initializing API client.');
-        if (botState.settings.BINANCE_API_KEY && botState.settings.BINANCE_SECRET_KEY) {
-            binanceApiClient = new BinanceApiClient(botState.settings.BINANCE_API_KEY, botState.settings.BINANCE_SECRET_KEY, log);
-        } else {
-            binanceApiClient = null;
-        }
+        binanceApiClient = (botState.settings.BINANCE_API_KEY && botState.settings.BINANCE_SECRET_KEY)
+            ? new BinanceApiClient(botState.settings.BINANCE_API_KEY, botState.settings.BINANCE_SECRET_KEY, log)
+            : null;
     }
     
-    // Restart scanner interval only if the timing changed
     if (botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS !== oldSettings.SCANNER_DISCOVERY_INTERVAL_SECONDS) {
-        log('INFO', `Scanner interval updated to ${botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS} seconds.`);
+        log('INFO', `Scanner interval updated to ${botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS}s.`);
         if (scannerInterval) clearInterval(scannerInterval);
         scannerInterval = setInterval(runScannerCycle, botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS * 1000);
     }
@@ -2007,22 +2025,14 @@ app.get('/api/status', requireAuth, (req, res) => {
 });
 
 app.get('/api/positions', requireAuth, (req, res) => {
-    // Augment positions with current price from scanner cache for frontend display
     const augmentedPositions = botState.activePositions.map(pos => {
         const priceData = botState.priceCache.get(pos.symbol);
         const currentPrice = priceData ? priceData.price : pos.average_entry_price;
         const current_value = currentPrice * pos.quantity;
         const pnl = (pos.realized_pnl || 0) + current_value - pos.total_cost_usd;
-        
         const initialFullPositionValue = pos.average_entry_price * pos.target_quantity;
         const pnl_pct = initialFullPositionValue > 0 ? (pnl / initialFullPositionValue) * 100 : 0;
-
-        return {
-            ...pos,
-            current_price: currentPrice,
-            pnl: pnl,
-            pnl_pct: pnl_pct,
-        };
+        return { ...pos, current_price: currentPrice, pnl, pnl_pct };
     });
     res.json(augmentedPositions);
 });
@@ -2037,10 +2047,8 @@ app.get('/api/performance-stats', requireAuth, (req, res) => {
     const losing_trades = botState.tradeHistory.filter(t => (t.pnl || 0) < 0).length;
     const total_pnl = botState.tradeHistory.reduce((sum, t) => sum + (t.pnl || 0), 0);
     const win_rate = total_trades > 0 ? (winning_trades / total_trades) * 100 : 0;
-    
-    const pnlPcts = botState.tradeHistory.map(t => t.pnl_pct).filter(p => p !== undefined && p !== null);
+    const pnlPcts = botState.tradeHistory.map(t => t.pnl_pct).filter(p => p != null);
     const avg_pnl_pct = pnlPcts.length > 0 ? pnlPcts.reduce((a, b) => a + b, 0) / pnlPcts.length : 0;
-
     res.json({ total_trades, winning_trades, losing_trades, total_pnl, win_rate, avg_pnl_pct });
 });
 
@@ -2051,7 +2059,6 @@ app.get('/api/scanner', requireAuth, (req, res) => {
 
 // --- ACTIONS ---
 app.post('/api/open-trade', requireAuth, (req, res) => {
-    // Manual trade opening logic can be added here if needed
     res.status(501).json({ message: 'Manual trade opening not implemented.' });
 });
 
@@ -2065,7 +2072,6 @@ app.post('/api/close-trade/:id', requireAuth, async (req, res) => {
 
     const closedTrade = await tradingEngine.closeTrade(tradeId, exitPrice, 'Manual Close');
     if (closedTrade) {
-        saveData('state');
         broadcast({ type: 'POSITIONS_UPDATED' });
         res.json(closedTrade);
     } else {
@@ -2075,11 +2081,11 @@ app.post('/api/close-trade/:id', requireAuth, async (req, res) => {
 
 app.post('/api/clear-data', requireAuth, async (req, res) => {
     log('WARN', 'User initiated data clear. Resetting all trade history and balance.');
-    botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
+    await db.run('DELETE FROM trades');
     botState.activePositions = [];
     botState.tradeHistory = [];
-    botState.tradeIdCounter = 1;
-    await saveData('state');
+    botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
+    await setKeyValue('balance', botState.balance);
     broadcast({ type: 'POSITIONS_UPDATED' });
     res.json({ success: true });
 });
@@ -2087,9 +2093,7 @@ app.post('/api/clear-data', requireAuth, async (req, res) => {
 // --- CONNECTION TESTS ---
 app.post('/api/test-connection', requireAuth, async (req, res) => {
     const { apiKey, secretKey } = req.body;
-    if (!apiKey || !secretKey) {
-        return res.status(400).json({ success: false, message: "API Key and Secret Key are required." });
-    }
+    if (!apiKey || !secretKey) return res.status(400).json({ success: false, message: "API Key and Secret Key are required." });
     const tempApiClient = new BinanceApiClient(apiKey, secretKey, log);
     try {
         await tempApiClient.getAccountInfo();
@@ -2099,62 +2103,69 @@ app.post('/api/test-connection', requireAuth, async (req, res) => {
     }
 });
 
+app.get('/api/ping-binance', requireAuth, async (req, res) => {
+    try {
+        const startTime = Date.now();
+        await fetch('https://api.binance.com/api/v3/time');
+        const endTime = Date.now();
+        const latency = endTime - startTime;
+        res.json({ success: true, latency });
+    } catch (error) {
+        log('ERROR', `Binance ping failed: ${error.message}`);
+        res.status(500).json({ success: false, message: 'Ping failed.' });
+    }
+});
+
 
 // --- BOT CONTROL ---
-app.get('/api/bot/status', requireAuth, (req, res) => {
-    res.json({ isRunning: botState.isRunning });
-});
+app.get('/api/bot/status', requireAuth, (req, res) => res.json({ isRunning: botState.isRunning }));
+
 app.post('/api/bot/start', requireAuth, async (req, res) => {
     botState.isRunning = true;
-    await saveData('state');
+    await setKeyValue('isRunning', 'true');
     log('INFO', 'Bot has been started via API.');
     res.json({ success: true });
 });
+
 app.post('/api/bot/stop', requireAuth, async (req, res) => {
     botState.isRunning = false;
-    await saveData('state');
+    await setKeyValue('isRunning', 'false');
     log('INFO', 'Bot has been stopped via API.');
     res.json({ success: true });
 });
-app.get('/api/mode', requireAuth, (req, res) => {
-    res.json({ mode: botState.tradingMode });
-});
+
+app.get('/api/mode', requireAuth, (req, res) => res.json({ mode: botState.tradingMode }));
+
 app.post('/api/mode', requireAuth, async (req, res) => {
     const { mode } = req.body;
-    if (['VIRTUAL', 'REAL_PAPER', 'REAL_LIVE'].includes(mode)) {
-        botState.tradingMode = mode;
-        if (mode === 'VIRTUAL') {
-            botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE; // Reset to virtual balance
-            log('INFO', 'Switched to VIRTUAL mode. Balance reset to virtual start.');
-        } else if (mode === 'REAL_LIVE' || mode === 'REAL_PAPER') {
-             if (!binanceApiClient) {
-                 botState.tradingMode = 'VIRTUAL'; // Revert
-                 await saveData('state');
-                 return res.status(400).json({ success: false, message: 'Binance API keys not set. Cannot switch to REAL mode.' });
-             }
-             try {
-                const accountInfo = await binanceApiClient.getAccountInfo();
-                const usdtBalance = accountInfo.balances.find(b => b.asset === 'USDT');
-                if (usdtBalance) {
-                    botState.balance = parseFloat(usdtBalance.free);
-                    log('INFO', `Switched to ${mode} mode. Real USDT balance fetched: $${botState.balance.toFixed(2)}`);
-                } else {
-                    botState.balance = 0;
-                    log('WARN', `Switched to ${mode} mode, but no USDT balance found.`);
-                }
-             } catch(error) {
-                 botState.tradingMode = 'VIRTUAL'; // Revert on error
-                 await saveData('state');
-                 return res.status(500).json({ success: false, message: `Failed to fetch real balance: ${error.message}` });
-             }
-        }
-        await saveData('state');
-        log('INFO', `Trading mode switched to ${mode}.`);
-        broadcast({ type: 'POSITIONS_UPDATED' }); // Trigger a full refresh
-        res.json({ success: true, mode: botState.tradingMode });
-    } else {
-        res.status(400).json({ success: false, message: 'Invalid mode.' });
+    if (!['VIRTUAL', 'REAL_PAPER', 'REAL_LIVE'].includes(mode)) {
+        return res.status(400).json({ success: false, message: 'Invalid mode.' });
     }
+    
+    botState.tradingMode = mode;
+    if (mode === 'VIRTUAL') {
+        botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
+        log('INFO', 'Switched to VIRTUAL mode. Balance reset.');
+    } else {
+        if (!binanceApiClient) {
+             botState.tradingMode = 'VIRTUAL'; // Revert
+             return res.status(400).json({ success: false, message: 'Binance API keys not set.' });
+        }
+        try {
+            const accountInfo = await binanceApiClient.getAccountInfo();
+            const usdtBalance = accountInfo.balances.find(b => b.asset === 'USDT');
+            botState.balance = usdtBalance ? parseFloat(usdtBalance.free) : 0;
+            log('INFO', `Switched to ${mode} mode. Real USDT balance: $${botState.balance.toFixed(2)}`);
+        } catch(error) {
+             botState.tradingMode = 'VIRTUAL'; // Revert
+             return res.status(500).json({ success: false, message: `Failed to fetch real balance: ${error.message}` });
+        }
+    }
+    await setKeyValue('tradingMode', botState.tradingMode);
+    await setKeyValue('balance', botState.balance);
+    log('INFO', `Trading mode switched to ${mode}.`);
+    broadcast({ type: 'POSITIONS_UPDATED' });
+    res.json({ success: true, mode: botState.tradingMode });
 });
 
 // --- Serve Frontend ---

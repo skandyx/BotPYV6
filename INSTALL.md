@@ -135,6 +135,12 @@ npm run build
 ```
 This will create an optimized version of your dashboard in a `dist/` directory.
 
+### 3.5. Data Persistence
+
+BOTPY uses a **SQLite database** (`backend/data/bot.db`) to store all trading data, including active positions and trade history. This provides a more robust and scalable solution than flat files.
+
+**Important:** For backups, you should regularly copy this `bot.db` file to a secure location. This file contains your entire trading history.
+
 ---
 
 ## 4. Running the Bot with PM2

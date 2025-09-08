@@ -8,11 +8,13 @@ BOTPY is a comprehensive web-based dashboard designed to monitor, control, and a
     -   `Virtual`: 100% simulation. Safe for testing and strategy optimization.
     -   `Real (Paper)`: Uses real Binance API keys for a live data feed but **simulates** trades without risking capital. The perfect final test.
     -   `Real (Live)`: Executes trades with real funds on your Binance account.
--   **Hybrid Strategy Engine**: The bot is truly market-agnostic. It simultaneously scans for two distinct types of high-probability setups on every pair: "Precision" (Squeeze 🎯) for calm-before-the-storm scenarios, and "Momentum" (Impulse 🔥) for explosive breakouts.
--   **Dynamic Adaptive Profiles**: Instead of a static configuration, the bot can operate as a "Tactical Chameleon". When enabled, it analyzes the market's volatility and trend strength for each specific trade and automatically selects the most effective management profile: "Sniper", "Scalper", or "Volatility Hunter".
+-   **Advanced Hybrid Strategy Engine**: Fuses a 'Macro-Micro Precision' model for squeeze plays with a high-speed 'Ignition' detector for volume spikes, ensuring adaptability to various market conditions.
+-   **Data-Driven Scoring**: Implements a sophisticated scoring system for both market scanning (Hotlist) and trade entry, quantifying signal quality and confidence levels.
+-   **Dynamic Adaptive Profiles**: Instead of a static configuration, the bot operates as a "Tactical Chameleon". When enabled, it analyzes the market's volatility and trend strength for each specific trade and automatically selects the most effective management profile: "Sniper", "Scalper", or "Volatility Hunter".
+-   **Specialized Risk Management**: Features unique trade management profiles, including a lightning-fast 'Flash Trailing Stop Loss' (SL Suiveur Éclair ⚡) tailored for explosive 'Ignition' trades.
 -   **Live Dashboard**: Offers an at-a-glance overview of key performance indicators (KPIs) such as balance, open positions, total Profit & Loss (P&L), and win rate.
--   **Real-time Market Scanner**: Displays the results of the market analysis, showing pairs with active trade signals (🎯 or 🔥), including ADX and ATR% data used by the adaptive logic.
--   **Detailed Trade History**: Provides a complete log of all past trades with powerful sorting, filtering, and data export (CSV) capabilities, now including strategy type for performance analysis.
+-   **Real-time Market Scanner**: Displays the results of the market analysis, showing pairs with active trade signals, scores, and all relevant data points.
+-   **Detailed Trade History**: Provides a complete log of all past trades with powerful sorting, filtering, and data export (CSV) capabilities.
 -   **Fully Configurable**: Every parameter of the strategy is easily adjustable through a dedicated settings page with helpful tooltips.
 
 ---
@@ -29,19 +31,11 @@ The application is designed with a dark, modern aesthetic (`bg-[#0c0e12]`), usin
 -   **Key Components**: Stat Cards (Balance, Open Positions, P&L), Performance Chart, and an Active Positions Table.
 
 ### 📡 Scanner
--   **Purpose**: To display the real-time results of the hybrid market analysis, showing which pairs are potential trade candidates.
+-   **Purpose**: To display the real-time results of the market analysis, showing which pairs are potential trade candidates.
 -   **Layout**: A data-dense table with sortable columns reflecting the strategy.
--   **Key Columns**:
-    -   `Signal`: Displays the type of setup detected: 🎯 for "Precision" or 🔥 for "Momentum".
-    -   `Symbol`, `Price` (with live green/red flashes).
-    -   `Score`: The final strategic score, displayed as a colored badge.
-    -   `Conditions`: Visual dots representing the status of each strategic filter.
-    -   `Tendance 4h (EMA50)`: Shows if the master trend filter is met.
-    -   `RSI 1h`: Displays the 1-hour RSI for the safety filter.
-    -   `ADX 15m` & `ATR % 15m`: The key indicators for the Dynamic Profile Selector.
 
 ### 📜 History
--   **Purpose**: A dedicated page for reviewing and analyzing the performance of all completed trades. Includes a "Stratégie" column to compare the profitability of 🎯 vs. 🔥 setups.
+-   **Purpose**: A dedicated page for reviewing and analyzing the performance of all completed trades.
 
 ### ⚙️ Settings
 -   **Purpose**: Allows for complete configuration of the bot's strategy, including enabling the "Dynamic Profile Selector" and setting its thresholds.
@@ -53,108 +47,89 @@ The application is designed with a dark, modern aesthetic (`bg-[#0c0e12]`), usin
 
 # Version Française
 
-## 🧠 Moteur de Stratégie Hybride : Le Chasseur d'Opportunités
+## 🧠 Stratégie Complète : “Chasseur de Précision Macro-Micro + Ignition + SL Suiveur ⚡”
 
-La philosophie du bot est d'être agnostique aux conditions de marché. Il ne se limite plus à un seul type de configuration. Au lieu de cela, il scanne en permanence et simultanément le marché à la recherche de deux types d'opportunités à haute probabilité : les phases de **Précision** (calme avant la tempête) et les phases de **Momentum** (accélération explosive).
-
----
-
-### **Volet 1 : Stratégie de Précision (Squeeze) 🎯**
-
-Cette stratégie vise à capturer le début d'un mouvement explosif en identifiant des périodes de compression de volatilité extrêmes sur le point de se résoudre. C'est la quintessence de l'approche "Macro-Micro".
-
-#### **Phase 1.1 : Le Radar Macro (Qualification du Signal de Précision)**
-
-*   **Contexte d'Analyse** : Graphique 15 minutes (15m) et 4 heures (4h).
-*   **Condition 1 : Filtre de Tendance Maître (Contexte 4h)**
-    *   **Outil** : Moyenne Mobile Exponentielle 50 périodes (MME50).
-    *   **Règle** : Le prix de clôture actuel sur le graphique 4h doit être **STRICTEMENT SUPÉRIEUR** à la MME50. ( `Prix > MME50_4h` ).
-*   **Condition 2 : Compression de Volatilité (Préparation 15m)**
-    *   **Outil** : Bandes de Bollinger (BB).
-    *   **Règle** : La paire doit être dans un **"Bollinger Band Squeeze"**. Ceci est défini lorsque la largeur des bandes sur la bougie de 15m *précédente* est dans le quartile inférieur (25%) de ses valeurs sur les 50 dernières périodes.
-*   **Action** : Si la `Condition 1` ET la `Condition 2` sont vraies, un **signal de Précision 🎯** est identifié. Le bot s'abonne dynamiquement aux flux 1m et 5m pour chercher la validation.
-
-#### **Phase 1.2 : Le Déclencheur Micro & Confirmation Multi-couches (Validation du Signal de Précision)**
-
-Pour les paires avec un signal 🎯, le bot analyse chaque bougie d'une minute pour trouver le point d'entrée parfait, protégé par une série de filtres anti-piège.
-
-*   **Contexte d'Analyse** : Graphique 1 minute (1m).
-*   **Condition 1 : Basculement du Momentum (L'Étincelle - 1m)**
-    *   **Outil** : Moyenne Mobile Exponentielle 9 périodes (MME9).
-    *   **Règle** : Une bougie de 1 minute doit **clôturer AU-DESSUS** de la MME9.
-*   **Condition 2 : Confirmation par le Volume (Le Carburant - 1m)**
-    *   **Outils** : Volume de trading, On-Balance Volume (OBV).
-    *   **Règle 2a (Volume 1m)** : Le volume de la bougie de déclenchement doit être **supérieur à 1.5 fois** la moyenne du volume récent.
-    *   **Règle 2b (OBV 1m)** : L'indicateur **OBV** sur 1 minute doit avoir une pente ascendante.
-*   **Condition 3 : Confirmation Instantanée & Validation Optionnelle**
-    *   **Règle (par défaut)** : Le bot entre en position **immédiatement après la clôture de la bougie de 1 minute** qui remplit les conditions de momentum et de volume. Cette approche maximise la réactivité pour ne pas manquer le début du mouvement.
-    *   **Validation Optionnelle (pour plus de sécurité)** : Pour les traders plus prudents, le paramètre `USE_MTF_VALIDATION` peut être activé. Si c'est le cas, le bot mettra le trade en **attente** et attendra la clôture d'une bougie haussière de 5 minutes pour confirmer la cassure avant d'entrer, réduisant ainsi le risque de faux signaux.
-*   **Condition 4 : Filtres de Sécurité Avancés (Anti-Piège)**
-    *   **Règles** : Le RSI (1h & 15m) ne doit pas être en surchauffe, la bougie de déclenchement ne doit pas avoir de grande mèche supérieure, et le prix ne doit pas être dans une phase parabolique.
-*   **Action** : Si toutes ces conditions sont remplies, un **trade de type Précision 🎯** est validé.
+La philosophie du bot est d'être un prédateur chirurgical, capable de s'adapter à différentes conditions de marché pour capturer des mouvements explosifs. Il utilise un système de notation multi-niveaux pour quantifier la qualité de chaque opportunité.
 
 ---
 
-### **Volet 2 : Stratégie de Momentum (Impulsion) 🔥**
+### **Phase 1 : Radar Macro (Génération de la Hotlist)**
 
-Cette stratégie est conçue pour capitaliser sur des mouvements déjà en cours qui montrent des signes d'accélération soudaine. Elle est moins axée sur la préparation et plus sur la réaction rapide à la force du marché.
+**Objectif :** Identifier les paires de devises présentant un fort potentiel haussier et les placer sur une "Hotlist" pour une surveillance intensive.
 
-#### **Phase 2.1 : Détection de l'Impulsion (Qualification du Signal de Momentum)**
+| Condition | Indicateur | Score |
+| :--- | :--- | :--- |
+| Tendance Haussière 4h | Prix de clôture > MME50 (4h) | 3 |
+| Compression Volatilité 15m | Bollinger Band Squeeze < 25% quartile sur 50 périodes | 3 |
+| Filtre d'Ignition 15m | Bougie précédente avec volume > 2× moyenne + clôture proche de la bande supérieure des BB | +2 |
 
-*   **Contexte d'Analyse** : Graphique 15 minutes (15m) et 4 heures (4h).
-*   **Condition 1 : Filtre de Tendance Maître (Contexte 4h)**
-    *   **Outil** : Moyenne Mobile Exponentielle 50 périodes (MME50).
-    *   **Règle** : Le prix doit être au-dessus de la MME50_4h.
-*   **Condition 2 : Bougie d'Impulsion (L'Explosion - 15m)**
-    *   **Règle** : Une bougie de 15 minutes doit clôturer avec une force significative, définie par un corps de bougie large et un volume bien supérieur à la moyenne.
-*   **Action** : Si la `Condition 1` ET la `Condition 2` sont vraies, un **signal de Momentum 🔥** est identifié.
+**Logique de la Hotlist :**
+```
+Score_Hotlist = Score_Tendance + Score_Bollinger + Score_Ignition
+Seuil_Hotlist = 5
 
-#### **Phase 2.2 : Confirmation et Entrée (Validation du Signal de Momentum)**
-
-*   **Contexte d'Analyse** : Graphique 5 minutes (5m).
-*   **Règle** : Le bot recherche une confirmation de continuation sur le graphique 5m. Il attend une bougie haussière qui valide la poursuite du mouvement impulsif, avec un volume soutenu.
-*   **Action** : Si la continuation est confirmée, un **trade de type Momentum 🔥** est validé.
-
----
-
-### **Phase 3 : Analyse Tactique & Sélection du Profil (Le Cerveau Adaptatif Commun)**
-
-**Cette phase est déclenchée après la validation d'un signal, qu'il soit de type 🎯 ou 🔥.** Juste avant d'ouvrir la position, si le mode dynamique est activé, le bot effectue une analyse de la "personnalité" du marché pour choisir la **stratégie de gestion de sortie** la plus appropriée.
-
-*   **Contexte d'Analyse** : Indicateurs 15 minutes (ADX, ATR %).
-*   **Matrice de Décision** :
-    1.  **Le marché est-il en "Range" ?** (`ADX < Seuil_Range`) -> Sélectionner le profil **"Le Scalpeur"**.
-    2.  **Sinon, le marché est-il "Hyper-Volatil" ?** (`ATR % > Seuil_Volatil`) -> Sélectionner le profil **"Le Chasseur de Volatilité"**.
-    3.  **Sinon (cas par défaut)** -> Sélectionner le profil **"Le Sniper"**.
-*   **Action Finale** : Exécuter l'ordre d'achat avec les paramètres du profil sélectionné et enregistrer le type de stratégie (🎯 ou 🔥) qui a déclenché l'entrée.
+Si Score_Hotlist >= Seuil_Hotlist:
+    Ajouter la paire à la Hotlist
+    S'abonner aux flux de données 1m et 5m
+```
 
 ---
 
-### **Phase 4 : Gestion de Trade & Entrée Intelligente**
+### **Phase 2 : Déclencheur Micro & Confirmation (Analyse 1m + 5m)**
 
-*   **Entrées Fractionnées (Scaling In)** : Pour minimiser le risque sur les faux signaux, le bot n'entre pas avec 100% de sa position. Il initie le trade avec une fraction (ex: 40%) et n'ajoute les autres parties (ex: 30%, puis 30%) que si les bougies suivantes confirment la continuation du mouvement.
+**Objectif :** Détecter le point d’entrée précis avec une confirmation multi-échelles pour les paires de la Hotlist, en utilisant un système de notation pour évaluer la confiance du signal.
 
-*   **Gestion de Sortie Progressive (Basée sur le Risque "R")** : La gestion de la sortie est dynamique, surtout pour le profil "Sniper".
-    1.  **Stop Loss Initial (Basé sur l'ATR)** : Le Stop Loss est placé intelligemment en fonction de la volatilité du marché (ATR).
-    2.  **Mise à Zéro du Risque (à +1R)** : Dès que le profit atteint 1 fois le risque initial (Gain = +1R), le Stop Loss est déplacé au point d'entrée, rendant le trade **sans risque**.
-    3.  **Trailing Stop Adaptatif (au-delà de +1R)** : Un Trailing Stop basé sur l'ATR prend le relais. Il se **resserre** automatiquement lorsque le trade atteint des multiples de R supérieurs (ex: +2R), protégeant les gains de manière plus agressive tout en laissant la place au trade de respirer.
+| Condition | Indicateur | Score |
+| :--- | :--- | :--- |
+| Momentum 1m | Prix de clôture > MME9 (1m) | 2 |
+| Volume 1m | Volume > 1.5 × moyenne récente (1m) | 1 |
+| OBV 1m | OBV ascendant (1m) | 1 |
+| CVD 5m | CVD ascendant (5m) | 1 |
+| Clôture 5m haussière | Bougie 5m > prix de déclenchement 1m | 2 |
+| Sécurité RSI | RSI 15m & 1h non suracheté | 1 |
+| Mèche haute | Bougie 1m sans mèche excessive | 1 |
+| Mouvement Parabolique | Pas de hausse verticale récente | 1 |
+| Déclencheur d'Ignition 1m | Bougie 1m avec volume > 2× et clôture > MME9 + momentum | +2 |
+
+**Calcul du Score de Trade :**
+```
+Score_Trade = somme(Scores_des_conditions)
+Seuil_Trade_High = 8
+Seuil_Trade_Low = 5
+
+Si Score_Trade >= Seuil_Trade_High:
+    Trade = Haute Confiance (souvent avec Ignition)
+Sinon si Score_Trade >= Seuil_Trade_Low:
+    Trade = Faible Confiance
+Sinon:
+    Pas de trade
+```
 
 ---
 
-### **Phase 5 : Sécurité du Portefeuille & Survie à Long Terme (Le Capital est Sacré)**
+### **Phase 2.5 : Sélecteur de Profil Dynamique**
 
-Ces règles de sécurité ont la priorité sur toutes les stratégies d'entrée.
+**Objectif :** Adapter la gestion du trade au type de marché actuel en analysant la force de la tendance (ADX) et la volatilité (ATR) sur le graphique 15m.
 
-*   **1. Filtre de Liquidité (Carnet d'Ordres)** : Avant tout trade, le bot vérifie qu'il y a suffisamment de liquidité dans le carnet d'ordres pour éviter le slippage.
+| Profil | Condition (15m) | Style de Gestion |
+| :--- | :--- | :--- |
+| **Scalpeur** | ADX < Seuil_Range (ex: 20) | SL serré, TP rapide, SL Suiveur ⚡ activé pour Ignition. |
+| **Chasseur Volatilité** | ATR% > Seuil_Volatil (ex: 5%) | SL basé sur l'ATR, TP dynamique, Trailing Stop agressif, SL Suiveur ⚡. |
+| **Sniper** | Marché stable (défaut) | Prise partielle, Break-even, Trailing Stop, SL Suiveur ⚡ pour Ignition. |
 
-*   **2. Détection de Manipulation ("Filtre Anti-Baleine")** : Si une bougie de 1 minute montre un volume anormalement explosif (ex: >5% du volume horaire moyen), le signal est ignoré pour éviter les pièges.
+---
 
-*   **3. Gestion de Corrélation par Secteur** : Pour éviter la surexposition, le bot n'ouvrira qu'un seul trade à la fois par "secteur" crypto (ex: un seul L1, un seul L2, etc.).
+### **Phase 3 : Gestion du Trade**
 
-*   **4. Mode "Risk-Off" Automatique** : Le bot surveille le sentiment de marché via l'indice **"Fear & Greed"**. Si le marché devient extrêmement euphorique ou paniqué, le trading est automatiquement mis en pause.
+#### **Stop Loss Suiveur Éclair ⚡ (pour les trades d'Ignition)**
 
-*   **5. Filtre de Dominance BTC/ETH** : Le bot surveille en permanence le prix du Bitcoin. Si BTC subit un "dump" violent et soudain (ex: >1.5% en 5 minutes), un **disjoncteur global** s'active, bloquant toute nouvelle entrée.
+C'est une arme secrète pour les mouvements les plus explosifs.
+1.  Une fois qu'un seuil de profit est atteint (ex: +0,5%), le SL se déplace agressivement au-dessus du prix d’entrée pour garantir un gain minimal.
+2.  Le SL suit ensuite le prix en temps réel avec un très petit décalage (ex: 0,2%), capturant la majorité du mouvement vertical tout en se protégeant contre un retournement soudain.
+3.  **Objectif :** Sécuriser les gains d'une tendance explosive tout en laissant le potentiel de hausse s'exprimer.
 
-*   **6. Coupe-Circuits de Capital** :
-    *   **Limite de Perte Journalière (Drawdown)** : Si le P&L total de la journée atteint un seuil négatif (ex: -3% du capital), le bot s'arrête complètement jusqu'au lendemain.
-    *   **Limite de Pertes Consécutives** : Si le bot enchaîne un nombre défini de trades perdants (ex: 5), il se met en pause temporairement.
+#### **Gestion par Profil :**
+
+*   **Scalpeur :** Sortie rapide, SL serré, TP court, SL Suiveur ⚡ actif si Ignition.
+*   **Chasseur Volatilité :** SL basé sur l'ATR, TP dynamique, Trailing Stop agressif, SL Suiveur ⚡ actif.
+*   **Sniper :** Prise de profit partielle, mise à break-even, trailing stop standard, et SL Suiveur ⚡ activé si le trade a été déclenché par un signal d'Ignition.

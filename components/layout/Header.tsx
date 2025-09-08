@@ -7,8 +7,9 @@ import { useSidebar } from '../../contexts/SidebarContext';
 import ToggleSwitch from '../common/ToggleSwitch';
 import Modal from '../common/Modal';
 import { TradingMode, WebSocketStatus, CircuitBreakerStatus } from '../../types';
-import { LogoutIcon, ClockIcon, MenuIcon } from '../icons/Icons';
+import { LogoutIcon, ClockIcon, MenuIcon, SignalIcon } from '../icons/Icons';
 import { useAppContext } from '../../contexts/AppContext';
+import { api } from '../../services/mockApi';
 
 const getTitleFromPath = (path: string): string => {
     const name = path.split('/').pop() || 'dashboard';
@@ -59,7 +60,29 @@ const Header: React.FC = () => {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const { setMobileOpen } = useSidebar();
   const { circuitBreakerStatus } = useAppContext();
+  const [latency, setLatency] = useState<number | null>(null);
 
+  // Effect for Binance latency ping
+  useEffect(() => {
+    const ping = async () => {
+        try {
+            const response = await api.pingBinance();
+            if (response.success) {
+                setLatency(response.latency);
+            } else {
+                setLatency(null);
+            }
+        } catch (error) {
+            console.error("Failed to ping Binance:", error);
+            setLatency(null);
+        }
+    };
+
+    ping(); // Initial ping
+    const pingInterval = setInterval(ping, 5000); // Ping every 5 seconds
+
+    return () => clearInterval(pingInterval);
+  }, []);
 
   useEffect(() => {
     setPageTitle(getTitleFromPath(location.pathname));
@@ -127,6 +150,13 @@ const Header: React.FC = () => {
     }
   };
   
+  const getLatencyColor = (ms: number | null) => {
+    if (ms === null) return 'text-gray-500';
+    if (ms < 100) return 'text-green-400';
+    if (ms < 300) return 'text-yellow-400';
+    return 'text-red-400';
+  };
+
   const cbMessage = circuitBreakerStatus !== 'NONE' && circuitBreakerMessages[circuitBreakerStatus];
 
   return (
@@ -157,6 +187,13 @@ const Header: React.FC = () => {
                             {isBotRunning ? 'Bot Actif' : 'Bot Inactif'}
                         </span>
                     </div>
+                </div>
+
+                <div className="hidden sm:flex items-center space-x-1 border-l border-[#2b2f38] pl-3" title={`Latence vers Binance: ${latency ?? 'N/A'} ms`}>
+                    <SignalIcon className={`h-4 w-4 ${getLatencyColor(latency)}`} />
+                    <span className={`text-xs font-mono w-12 ${getLatencyColor(latency)}`}>
+                        {latency !== null ? `${latency} ms` : '...'}
+                    </span>
                 </div>
 
                 <div className="hidden md:flex items-center space-x-2" title="Temps avant la prochaine analyse (1m)">

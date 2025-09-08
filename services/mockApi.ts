@@ -86,7 +86,7 @@ export const api = {
     fetchScannedPairs: async () => {
         return apiFetch('/scanner');
     },
-
+    
     // Actions
     openTrade: async (symbol: string, price: number, mode: TradingMode): Promise<Trade> => {
         return apiFetch('/open-trade', {
@@ -105,6 +105,9 @@ export const api = {
             method: 'POST',
             body: JSON.stringify({ apiKey, secretKey })
         });
+    },
+    pingBinance: async (): Promise<{ success: boolean, latency: number }> => {
+        return apiFetch('/ping-binance');
     },
 
     // Bot Control
