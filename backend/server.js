@@ -605,10 +605,12 @@ class RealtimeAnalyzer {
             removeSymbolFromMicroStreams(symbol);
         }
 
-        if(isOnHotlist) {
+        if (isOnHotlist) {
             pairToUpdate.score = 'COMPRESSION';
+            pairToUpdate.strategy_type = 'PRECISION';
         } else {
              pairToUpdate.score = 'HOLD';
+             pairToUpdate.strategy_type = undefined;
         }
         
         broadcast({ type: 'SCANNER_UPDATE', payload: pairToUpdate });
@@ -666,13 +668,14 @@ class RealtimeAnalyzer {
 
         if(score_1m > 0) { // Only proceed if there is some positive signal
             pair.score = 'PENDING_CONFIRMATION';
+            pair.strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
             const triggerCandle = klines1m[klines1m.length-1];
             botState.pendingConfirmation.set(symbol, {
                 triggerPrice: triggerCandle.close,
                 triggerTimestamp: Date.now(),
                 slPriceReference: triggerCandle.low,
                 settings: tradeSettings,
-                strategy_type: is_ignition_signal ? 'IGNITION' : 'PRECISION',
+                strategy_type: pair.strategy_type,
                 micro_score_1m: score_1m,
             });
             this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Ignition: ${is_ignition_signal}`);
@@ -712,11 +715,13 @@ class RealtimeAnalyzer {
             const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, slPriceReference, settings);
             if (tradeOpened) {
                 pair.is_on_hotlist = false;
+                pair.strategy_type = undefined;
                 removeSymbolFromMicroStreams(symbol);
             }
         } else {
             this.log('TRADE', `[MTF FAILED - ${strategy_type}] 5m did not confirm for ${symbol}. Final score ${final_micro_score} < ${threshold}.`);
             pair.score = 'FAKE_BREAKOUT';
+            pair.strategy_type = undefined;
         }
         
         botState.pendingConfirmation.delete(symbol);
@@ -1406,6 +1411,7 @@ const tradingEngine = {
                 const pair = botState.scannerCache.find(p => p.symbol === symbol);
                 if (pair) {
                     pair.score = 'HOLD';
+                    pair.strategy_type = undefined;
                     broadcast({ type: 'SCANNER_UPDATE', payload: pair });
                 }
             }
