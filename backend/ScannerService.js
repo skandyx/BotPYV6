@@ -83,45 +83,42 @@ export class ScannerService {
         this.log('SCANNER', `Performing long-term analysis for ${symbol}...`);
 
         // --- Fetch Data ---
-        const klines4h = await this.fetchKlinesFromBinance(symbol, '4h', 0, 100);
-        if (klines4h.length < 50) return null;
+        const klines4h = await this.fetchKlinesFromBinance(symbol, '4h', 0, 201);
+        if (klines4h.length < 200) return null;
         
         const klines1h = await this.fetchKlinesFromBinance(symbol, '1h', 0, 100);
         if (klines1h.length < 21) return null;
 
-        // --- 4h ANALYSIS (MACRO TREND) ---
+        // --- 4h ANALYSIS (MACRO TREND SCORE) ---
         const closes4h = klines4h.map(k => parseFloat(k[4]));
-        const highs4h = klines4h.map(k => parseFloat(k[2]));
-        const lows4h = klines4h.map(k => parseFloat(k[3]));
+        let trend4h_score = 0;
+        const lastClose4h = closes4h[closes4h.length-1];
         
-        const lastClose4h = closes4h[closes4h.length - 1];
-        
-        // Condition 1: Price above EMA50
-        const lastEma50_4h = EMA.calculate({ period: 50, values: closes4h }).pop();
-        const price_above_ema50_4h = lastClose4h > lastEma50_4h;
-        
-        // Condition 2: RSI for Momentum
-        const rsi4h = RSI.calculate({ period: 14, values: closes4h }).pop();
-        const hasMomentum = rsi4h > 50;
-        
-        // Condition 3: ADX for Trend Strength
-        const adxResult = ADX.calculate({ high: highs4h, low: lows4h, close: closes4h, period: 14 }).pop();
-        const isTrending = adxResult && adxResult.adx > 20;
+        const ema200_4h = EMA.calculate({ period: 200, values: closes4h }).pop();
+        if(lastClose4h > ema200_4h) trend4h_score += 1; else trend4h_score -=1;
 
-        // Enhanced Trend Score Calculation
-        let trend_score = 0;
-        if (price_above_ema50_4h) trend_score += 40; // Base score for being in the right direction
-        if (hasMomentum) trend_score += 30;         // Bonus for momentum
-        if (isTrending) trend_score += 30;          // Bonus for trend strength
+        const rsi_4h = RSI.calculate({ period: 14, values: closes4h }).pop();
+        if(rsi_4h > 55) trend4h_score += 0.5; else if(rsi_4h < 45) trend4h_score -= 0.5;
+
+        const macd_4h_input = { values: closes4h, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, simpleMAOscillator: false, simpleMASignal: false };
+        const macd_4h = MACD.calculate(macd_4h_input);
+        const last_macd_4h = macd_4h[macd_4h.length-1];
+        if(last_macd_4h && last_macd_4h.MACD > last_macd_4h.signal) trend4h_score += 0.5; else if(last_macd_4h && last_macd_4h.MACD < last_macd_4h.signal) trend4h_score -= 0.5;
+        
+        trend4h_score = Math.max(-2, Math.min(2, trend4h_score));
+
 
         // --- 1h ANALYSIS (Safety Filter) ---
         const closes1h = klines1h.map(k => parseFloat(k[4]));
         const rsi_1h = RSI.calculate({ values: closes1h, period: 14 }).pop();
 
         const analysisData = {
-            price_above_ema50_4h,
-            trend_score,
+            price_above_ema50_4h: lastClose4h > EMA.calculate({ period: 50, values: closes4h }).pop(), // Keep for legacy display
+            trend_score: (trend4h_score + 2) * 25, // Normalize to 0-100 for UI
             rsi_1h,
+            conditions: {
+                trend4h_score,
+            },
             // Defaults that will be updated by the real-time analyzer
             priceDirection: 'neutral',
             score: 'HOLD',

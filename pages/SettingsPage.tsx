@@ -30,7 +30,7 @@ const settingProfiles: Record<ProfileName, Partial<BotSettings>> = {
         USE_ATR_STOP_LOSS: true,
         ATR_MULTIPLIER: 1.5,
         USE_PARTIAL_TAKE_PROFIT: true,
-        PARTIAL_TP_TRIGGER_PCT: 0.8,
+        PARTIAL_TP_TRIGGER_PCT: 1.0, // 1% PnL trigger
         PARTIAL_TP_SELL_QTY_PCT: 50,
         USE_AUTO_BREAKEVEN: true,
         BREAKEVEN_TRIGGER_R: 1.0,
@@ -52,8 +52,8 @@ const settingProfiles: Record<ProfileName, Partial<BotSettings>> = {
         PARABOLIC_FILTER_PERIOD_MINUTES: 5,
         PARABOLIC_FILTER_THRESHOLD_PCT: 3.5,
         USE_ATR_STOP_LOSS: false,
-        STOP_LOSS_PCT: 2.0,
-        RISK_REWARD_RATIO: 0.75,
+        STOP_LOSS_PCT: 0.3,
+        RISK_REWARD_RATIO: 2.0, // 0.6% TP / 0.3% SL
         USE_PARTIAL_TAKE_PROFIT: false,
         USE_AUTO_BREAKEVEN: false,
         ADJUST_BREAKEVEN_FOR_FEES: false,
@@ -148,7 +148,7 @@ const tooltips: Record<string, string> = {
     USE_OBV_5M_VALIDATION: "Confirmation de Volume Multi-Échelles : Exige que la tendance de l'OBV soit également haussière sur l'unité de temps de 5 minutes après la confirmation, pour éviter les divergences.",
     USE_IGNITION_STRATEGY: "Stratégie à haut risque pour détecter les 'pumps' soudains basés sur une explosion de prix et de volume sur une bougie de 1 minute.",
     IGNITION_PRICE_THRESHOLD_PCT: "Le pourcentage minimum de hausse de prix sur une seule bougie de 1 minute pour déclencher un signal d'Ignition.",
-    IGNITION_VOLUME_MULTIPLIER: "Le multiplicateur de volume requis. Le volume de la bougie de 1 minute doit être ce nombre de fois supérieur à la moyenne récente.",
+    IGNITION_VOLUME_MULTIPLIER: "Le multiplicateur de volume requis. Le volume de la bougie de 1 minute doit être ce nombre de fois supérieur à la moyenne recente.",
     USE_FLASH_TRAILING_STOP: "Active un stop loss suiveur en pourcentage, très serré et réactif, spécifiquement pour les trades Ignition. Recommandé.",
     FLASH_TRAILING_STOP_PCT: "Le pourcentage en dessous du plus haut prix atteint auquel le stop suiveur sera placé. Ex: 1.5 pour -1.5%.",
 };

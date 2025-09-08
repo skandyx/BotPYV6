@@ -78,43 +78,6 @@ const EmptyScannerIcon = () => (
     </svg>
 );
 
-const Dot: React.FC<{ active: boolean; tooltip: string }> = ({ active, tooltip }) => (
-    <div
-      className={`h-3 w-3 rounded-full transition-colors ${active ? 'bg-green-500' : 'bg-red-500'}`}
-      title={tooltip}
-    />
-);
-
-const ConditionDots: React.FC<{ conditions?: StrategyConditions }> = ({ conditions }) => {
-    const conditionTooltips = {
-        squeeze: 'Précision: Compression 15m (BB Squeeze)',
-        breakout: 'Précision: Cassure 1m (Clôture > EMA9)',
-        volume: 'Précision: Volume 1m (> 1.5x Moyenne)',
-        obv: 'Précision: Confirmation OBV 1m',
-        cvd_5m_trending_up: 'Précision: Confirmation CVD 5m',
-        safety: 'Sécurité Partagée: RSI 1h < Seuil',
-        rsi_mtf: 'Sécurité Partagée: RSI 15m < Seuil',
-        structure: 'Précision: Confirmation Structurelle 15m',
-        momentum_impulse: 'Momentum: Bougie d\'impulsion 15m',
-        momentum_confirmation: 'Momentum: Suivi 5m',
-    };
-
-    return (
-        <div className="flex items-center space-x-2">
-            <Dot active={conditions?.squeeze ?? false} tooltip={conditionTooltips.squeeze} />
-            <Dot active={conditions?.breakout ?? false} tooltip={conditionTooltips.breakout} />
-            <Dot active={conditions?.volume ?? false} tooltip={conditionTooltips.volume} />
-            <Dot active={conditions?.obv ?? false} tooltip={conditionTooltips.obv} />
-            <Dot active={conditions?.cvd_5m_trending_up ?? false} tooltip={conditionTooltips.cvd_5m_trending_up} />
-            <Dot active={conditions?.safety ?? false} tooltip={conditionTooltips.safety} />
-            <Dot active={conditions?.rsi_mtf ?? false} tooltip={conditionTooltips.rsi_mtf} />
-            <Dot active={conditions?.structure ?? false} tooltip={conditionTooltips.structure} />
-            <Dot active={conditions?.momentum_impulse ?? false} tooltip={conditionTooltips.momentum_impulse} />
-        </div>
-    );
-};
-
-
 const ScannerPage: React.FC = () => {
   const [pairs, setPairs] = useState<ScannedPair[]>(() => scannerStore.getScannedPairs());
   const [sortConfig, setSortConfig] = useState<SortConfig | null>({ key: 'score_value', direction: 'desc' });
@@ -267,7 +230,7 @@ const ScannerPage: React.FC = () => {
     return <div className="flex justify-center items-center h-64"><Spinner /></div>;
   }
   
-  const totalColumnCount = 14;
+  const totalColumnCount = 13;
 
   return (
     <div className="space-y-6">
@@ -317,12 +280,6 @@ const ScannerPage: React.FC = () => {
                         <th scope="col" className="px-2 sm:px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Tendance 4h</th>
                         <SortableHeader sortConfig={sortConfig} requestSort={requestSort} sortKey="score_value">Score Global</SortableHeader>
                         <SortableHeader sortConfig={sortConfig} requestSort={requestSort} sortKey="trend_score">Score Tendance</SortableHeader>
-                        <th scope="col" className="px-2 sm:px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
-                            <div className="flex items-center">
-                                <span>Conditions</span>
-                                <Tooltip text="Conditions pour la stratégie Précision (Squeeze) et Momentum. La Tendance 4h est dans sa propre colonne." />
-                            </div>
-                        </th>
                         <SortableHeader sortConfig={sortConfig} requestSort={requestSort} sortKey="rsi_1h">RSI 1h</SortableHeader>
                         <SortableHeader sortConfig={sortConfig} requestSort={requestSort} sortKey="rsi_15m">RSI 15m</SortableHeader>
                         <SortableHeader sortConfig={sortConfig} requestSort={requestSort} sortKey="volume">Volume 24h</SortableHeader>
@@ -391,9 +348,6 @@ const ScannerPage: React.FC = () => {
                                     </td>
                                     <td className={`px-2 sm:px-4 lg:px-6 py-4 whitespace-nowrap text-sm font-bold ${getTrendScoreColorClass(pair.trend_score)}`}>
                                         {pair.trend_score?.toFixed(0) || 'N/A'}
-                                    </td>
-                                    <td className="px-2 sm:px-4 lg:px-6 py-4 whitespace-nowrap">
-                                        <ConditionDots conditions={pair.conditions} />
                                     </td>
                                     <td className={`px-2 sm:px-4 lg:px-6 py-4 whitespace-nowrap text-sm ${getRsiColorClass(pair.rsi_1h, '1h')}`}>
                                         {pair.rsi_1h?.toFixed(1) || 'N/A'}

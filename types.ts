@@ -85,19 +85,18 @@ export interface Trade {
 }
 
 export interface StrategyConditions {
-    trend: boolean;
-    squeeze: boolean;
-    breakout: boolean;
-    volume: boolean;
-    safety: boolean; // 1h RSI
-    structure?: boolean;
-    obv?: boolean; // 1m OBV
-    rsi_mtf?: boolean; // New: 15m RSI safety check
-    cvd_5m_trending_up?: boolean; // New: 5m Cumulative Volume Delta
-    // --- Momentum Strategy Specific ---
-    momentum_impulse?: boolean; // 15m impulse candle
-    momentum_confirmation?: boolean; // 5m follow-through
+    // Phase 1 (Macro)
+    trend4h_score?: number;
+    trend15m_score?: number;
+    volume_score?: number;
+    hotlist_score?: number;
+    // Phase 2 (Micro)
+    score_1m?: number;
+    score_5m_confirm?: number;
+    final_micro_score?: number;
+    is_ignition_signal?: boolean;
 }
+
 
 export interface ScannedPair {
     symbol: string;
