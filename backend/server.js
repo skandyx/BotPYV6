@@ -528,22 +528,42 @@ class RealtimeAnalyzer {
         const old_hotlist_status = pairToUpdate.is_on_hotlist;
 
         const closes15m = klines15m.map(d => d.close);
+        const highs15m = klines15m.map(d => d.high);
+        const lows15m = klines15m.map(d => d.low);
+        const volumes15m = klines15m.map(k => k.volume);
+        const lastClose15m = closes15m[closes15m.length - 1];
+
+        // --- Calculate all 15m indicators for display ---
+        const rsi15m = RSI.calculate({ period: 14, values: closes15m }).pop();
+        const adxInput = { high: highs15m, low: lows15m, close: closes15m, period: 14 };
+        const adxResult = ADX.calculate(adxInput).pop();
+        const adx15m = adxResult ? adxResult.adx : undefined;
+        const atrInput = { high: highs15m, low: lows15m, close: closes15m, period: 14 };
+        const atr15m = ATR.calculate(atrInput).pop();
+        const atr_pct_15m = atr15m ? (atr15m / lastClose15m) * 100 : undefined;
+
+        const bbInput = { period: 20, values: closes15m, stdDev: 2 };
+        const bbResult = BollingerBands.calculate(bbInput);
+        const lastBb = bbResult.length > 0 ? bbResult[bbResult.length - 1] : null;
+        let bb_width_pct, is_in_squeeze_15m = false;
+        if (lastBb && lastBb.middle > 0) {
+            bb_width_pct = ((lastBb.upper - lastBb.lower) / lastBb.middle) * 100;
+            // A simple squeeze check: width is less than 3%
+            is_in_squeeze_15m = bb_width_pct < 3.0;
+        }
         
         // --- 15m Trend Score ---
         let trend15m_score = 0;
-        const lastClose15m = closes15m[closes15m.length - 1];
         const ema50_15m = EMA.calculate({ period: 50, values: closes15m }).pop();
         const ema200_15m = EMA.calculate({ period: 200, values: closes15m }).pop();
         if(lastClose15m > ema50_15m) trend15m_score += 0.5; else trend15m_score -= 0.5;
         if(ema50_15m > ema200_15m) trend15m_score += 0.5; else trend15m_score -= 0.5;
-        const rsi15m = RSI.calculate({ period: 14, values: closes15m }).pop();
         if(rsi15m > 55) trend15m_score += 0.5; else if(rsi15m < 45) trend15m_score -= 0.5;
         const macd_15m = MACD.calculate({ values: closes15m, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, simpleMAOscillator: false, simpleMASignal: false }).pop();
         if(macd_15m && macd_15m.MACD > macd_15m.signal) trend15m_score += 0.5; else if(macd_15m && macd_15m.MACD < macd_15m.signal) trend15m_score -= 0.5;
         trend15m_score = Math.max(-2, Math.min(2, trend15m_score));
 
         // --- Relative Volume Score ---
-        const volumes15m = klines15m.map(k => k.volume);
         const avgVolume = volumes15m.slice(-97, -1).reduce((sum, v) => sum + v, 0) / 96; // 24h average
         const lastVolume = volumes15m[volumes15m.length - 1];
         let volume_score = 0;
@@ -559,6 +579,18 @@ class RealtimeAnalyzer {
         const isOnHotlist = hotlist_score >= 5;
 
         // --- FINAL STATE UPDATE ---
+        pairToUpdate.rsi_15m = rsi15m;
+        pairToUpdate.adx_15m = adx15m;
+        pairToUpdate.atr_15m = atr15m;
+        pairToUpdate.atr_pct_15m = atr_pct_15m;
+        pairToUpdate.bollinger_bands_15m = {
+            upper: lastBb?.upper,
+            middle: lastBb?.middle,
+            lower: lastBb?.lower,
+            width_pct: bb_width_pct
+        };
+        pairToUpdate.is_in_squeeze_15m = is_in_squeeze_15m;
+
         pairToUpdate.is_on_hotlist = isOnHotlist;
         pairToUpdate.conditions.trend15m_score = trend15m_score;
         pairToUpdate.conditions.volume_score = volume_score;
