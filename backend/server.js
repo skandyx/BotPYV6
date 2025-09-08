@@ -300,39 +300,6 @@ const prepareTradeForDb = (trade) => {
     return dbTrade;
 };
 
-
-// --- Auth Helpers ---
-const hashPassword = (password) => {
-    return new Promise((resolve, reject) => {
-        const salt = crypto.randomBytes(16).toString('hex');
-        crypto.scrypt(password, salt, 64, (err, derivedKey) => {
-            if (err) reject(err);
-            resolve(salt + ":" + derivedKey.toString('hex'));
-        });
-    });
-};
-
-const verifyPassword = (password, hash) => {
-    return new Promise((resolve, reject) => {
-        const [salt, key] = hash.split(':');
-        if (!salt || !key) {
-            return reject(new Error('Invalid hash format.'));
-        }
-        crypto.scrypt(password, salt, 64, (err, derivedKey) => {
-            if (err) reject(err);
-            try {
-                const keyBuffer = Buffer.from(key, 'hex');
-                const match = crypto.timingSafeEqual(keyBuffer, derivedKey);
-                resolve(match);
-            } catch (e) {
-                // Handle cases where the key is not valid hex, preventing crashes
-                resolve(false);
-            }
-        });
-    });
-};
-
-
 const loadData = async () => {
     await ensureDataDirs();
     
@@ -443,10 +410,10 @@ const loadData = async () => {
     log('INFO', `Loaded ${botState.activePositions.length} active positions and ${botState.tradeHistory.length} historical trades from DB.`);
 
 
-    // 5. Load auth from JSON
+    // 5. Load auth from JSON (plaintext password)
     try {
         const authContent = await fs.readFile(AUTH_FILE_PATH, 'utf-8');
-        botState.passwordHash = JSON.parse(authContent).passwordHash;
+        botState.password = JSON.parse(authContent).password;
     } catch {
         log("WARN", "auth.json not found. Initializing from .env.");
         const initialPassword = process.env.APP_PASSWORD;
@@ -454,8 +421,8 @@ const loadData = async () => {
             log('ERROR', 'CRITICAL: APP_PASSWORD is not set in .env. Please set it and restart.');
             process.exit(1);
         }
-        botState.passwordHash = await hashPassword(initialPassword);
-        await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ passwordHash: botState.passwordHash }, null, 2));
+        botState.password = initialPassword;
+        await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ password: botState.password }, null, 2));
     }
     
     realtimeAnalyzer.updateSettings(botState.settings);
@@ -467,7 +434,7 @@ const saveData = async (type) => {
     if (type === 'settings') {
         await fs.writeFile(SETTINGS_FILE_PATH, JSON.stringify(botState.settings, null, 2));
     } else if (type === 'auth') {
-        await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ passwordHash: botState.passwordHash }, null, 2));
+        await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ password: botState.password }, null, 2));
     }
 };
 
@@ -873,7 +840,7 @@ let botState = {
     scannerCache: [],
     isRunning: true,
     tradingMode: 'VIRTUAL',
-    passwordHash: '',
+    password: '',
     recentlyLostSymbols: new Map(),
     hotlist: new Set(),
     pendingConfirmation: new Map(),
@@ -1228,10 +1195,244 @@ const tradingEngine = {
 // --- Global Safety & Main Loop (largely unchanged) ---
 async function checkGlobalSafetyRules() { /* ... */ }
 async function fetchFearAndGreedIndex() { /* ... */ }
-const startBot = async () => { /* ... */ };
+const startBot = async () => { 
+    if (scannerInterval) clearInterval(scannerInterval);
+    if (!botState.isRunning) {
+        log('INFO', 'Bot is stopped. Not starting main loops.');
+        return;
+    }
 
-// --- API Endpoints (largely unchanged) ---
-/* ... all endpoints ... */
+    log('INFO', 'Bot starting...');
+    if (botState.settings.BINANCE_API_KEY && botState.settings.BINANCE_SECRET_KEY) {
+        binanceApiClient = new BinanceApiClient(botState.settings.BINANCE_API_KEY, botState.settings.BINANCE_SECRET_KEY, log);
+        try {
+            const exchangeInfo = await binanceApiClient.getExchangeInfo();
+            exchangeInfo.symbols.forEach(s => {
+                const lotSizeFilter = s.filters.find(f => f.filterType === 'LOT_SIZE');
+                const minNotionalFilter = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
+                symbolRules.set(s.symbol, {
+                    stepSize: lotSizeFilter ? parseFloat(lotSizeFilter.stepSize) : 0.00000001,
+                    minNotional: minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5.0
+                });
+            });
+        } catch (error) {
+            log('ERROR', 'Failed to initialize Binance API client or fetch exchange info. REAL modes will fail.');
+        }
+    } else {
+        log('WARN', 'Binance API keys not set. REAL modes are disabled.');
+    }
+
+    // Start scanner cycle
+    await runScannerCycle(); // Run once immediately
+    scannerInterval = setInterval(runScannerCycle, botState.settings.SCANNER_DISCOVERY_INTERVAL_SECONDS * 1000);
+
+    // Start position management loop
+    setInterval(tradingEngine.monitorAndManagePositions, 1000);
+
+    // Start background data fetchers
+    setInterval(fetchFearAndGreedIndex, 60 * 60 * 1000); // every hour
+    fetchFearAndGreedIndex();
+
+    // Start Binance WebSocket connection
+    connectToBinanceStreams();
+};
+
+
+// --- API Endpoints ---
+const authMiddleware = (req, res, next) => {
+    if (req.session.isAuthenticated) {
+        next();
+    } else {
+        res.status(401).json({ message: 'Unauthorized' });
+    }
+};
+
+app.post('/api/login', async (req, res) => {
+    const { password } = req.body;
+    try {
+        const isValid = password === botState.password; // Plain text comparison
+        if (isValid) {
+            req.session.isAuthenticated = true;
+            res.json({ success: true, message: 'Login successful' });
+        } else {
+            res.status(401).json({ success: false, message: 'Invalid password' });
+        }
+    } catch (error) {
+        log('ERROR', `Login attempt failed: ${error.message}`);
+        res.status(500).json({ success: false, message: 'Internal server error during login' });
+    }
+});
+
+app.post('/api/logout', (req, res) => {
+    req.session.destroy(err => {
+        if (err) {
+            return res.status(500).json({ message: 'Could not log out.' });
+        }
+        res.clearCookie('connect.sid');
+        res.status(204).send();
+    });
+});
+
+app.get('/api/check-session', (req, res) => {
+    res.json({ isAuthenticated: !!req.session.isAuthenticated });
+});
+
+app.post('/api/change-password', authMiddleware, async (req, res) => {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) {
+        return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
+    }
+    try {
+        botState.password = newPassword; // Store plaintext
+        await saveData('auth');
+        res.json({ success: true, message: 'Password updated successfully.' });
+    } catch (error) {
+        log('ERROR', `Failed to change password: ${error.message}`);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+});
+
+// Settings
+app.get('/api/settings', authMiddleware, (req, res) => res.json(botState.settings));
+app.post('/api/settings', authMiddleware, async (req, res) => {
+    botState.settings = { ...botState.settings, ...req.body };
+    realtimeAnalyzer.updateSettings(botState.settings);
+    scanner.updateSettings(botState.settings);
+    await saveData('settings');
+    res.json({ success: true });
+});
+
+// Data
+app.get('/api/status', authMiddleware, (req, res) => {
+    res.json({
+        mode: botState.tradingMode,
+        balance: botState.balance,
+        positions: botState.activePositions.length,
+        monitored_pairs: botState.scannerCache.length,
+        top_pairs: botState.scannerCache.slice(0, 10).map(p => p.symbol),
+        max_open_positions: botState.settings.MAX_OPEN_POSITIONS
+    });
+});
+app.get('/api/positions', authMiddleware, (req, res) => res.json(botState.activePositions));
+app.get('/api/history', authMiddleware, (req, res) => res.json(botState.tradeHistory));
+app.get('/api/performance-stats', authMiddleware, (req, res) => {
+    const totalTrades = botState.tradeHistory.length;
+    const winningTrades = botState.tradeHistory.filter(t => t.pnl > 0).length;
+    const totalPnl = botState.tradeHistory.reduce((sum, t) => sum + (t.pnl || 0), 0);
+    res.json({
+        total_trades: totalTrades,
+        winning_trades: winningTrades,
+        losing_trades: totalTrades - winningTrades,
+        total_pnl: totalPnl,
+        win_rate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0,
+        avg_pnl_pct: totalTrades > 0 ? botState.tradeHistory.reduce((sum, t) => sum + (t.pnl_pct || 0), 0) / totalTrades : 0
+    });
+});
+app.get('/api/scanner', authMiddleware, (req, res) => res.json(botState.scannerCache));
+
+// Actions
+app.post('/api/close-trade/:id', authMiddleware, async (req, res) => {
+    const tradeId = parseInt(req.params.id, 10);
+    const position = botState.activePositions.find(p => p.id === tradeId);
+    if (position) {
+        const priceData = botState.priceCache.get(position.symbol);
+        const exitPrice = priceData ? priceData.price : position.entry_price;
+        const closedTrade = await tradingEngine.closeTrade(tradeId, exitPrice);
+        broadcast({ type: 'POSITIONS_UPDATED' });
+        res.json(closedTrade);
+    } else {
+        res.status(404).json({ success: false, message: 'Trade not found' });
+    }
+});
+
+app.post('/api/clear-data', authMiddleware, async (req, res) => {
+    log('WARN', 'CLEARING ALL TRADE DATA AND RESETTING BALANCE.');
+    botState.activePositions = [];
+    botState.tradeHistory = [];
+    botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
+    botState.dayStartBalance = botState.settings.INITIAL_VIRTUAL_BALANCE;
+    botState.dailyPnl = 0;
+    botState.consecutiveLosses = 0;
+    await db.exec('DELETE FROM trades');
+    await setKeyValue('balance', botState.balance.toString());
+    await setKeyValue('dayStartBalance', botState.dayStartBalance.toString());
+    await setKeyValue('dailyPnl', '0');
+    await setKeyValue('consecutiveLosses', '0');
+    broadcast({ type: 'POSITIONS_UPDATED' });
+    res.json({ success: true });
+});
+
+app.post('/api/test-connection', authMiddleware, async (req, res) => {
+    const { apiKey, secretKey } = req.body;
+    try {
+        const tempClient = new BinanceApiClient(apiKey, secretKey, log);
+        await tempClient.getAccountInfo();
+        res.json({ success: true, message: 'Connection successful!' });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/ping-binance', authMiddleware, async (req, res) => {
+    const startTime = Date.now();
+    try {
+        await fetch('https://api.binance.com/api/v3/time');
+        const latency = Date.now() - startTime;
+        res.json({ success: true, latency });
+    } catch (error) {
+        res.status(500).json({ success: false, latency: -1 });
+    }
+});
+
+// Bot Control
+app.get('/api/bot/status', authMiddleware, (req, res) => res.json({ isRunning: botState.isRunning }));
+app.post('/api/bot/start', authMiddleware, async (req, res) => {
+    if (!botState.isRunning) {
+        botState.isRunning = true;
+        await setKeyValue('isRunning', 'true');
+        log('INFO', 'Bot started via API.');
+        startBot();
+    }
+    res.json({ success: true });
+});
+app.post('/api/bot/stop', authMiddleware, async (req, res) => {
+    if (botState.isRunning) {
+        botState.isRunning = false;
+        await setKeyValue('isRunning', 'false');
+        log('INFO', 'Bot stopped via API.');
+        if(scannerInterval) clearInterval(scannerInterval);
+    }
+    res.json({ success: true });
+});
+
+// Trading Mode
+app.get('/api/mode', authMiddleware, (req, res) => res.json({ mode: botState.tradingMode }));
+app.post('/api/mode', authMiddleware, async (req, res) => {
+    const { mode } = req.body;
+    if (['VIRTUAL', 'REAL_PAPER', 'REAL_LIVE'].includes(mode)) {
+        botState.tradingMode = mode;
+        await setKeyValue('tradingMode', mode);
+        log('INFO', `Trading mode changed to: ${mode}`);
+        res.json({ success: true, mode });
+    } else {
+        res.status(400).json({ success: false, message: 'Invalid mode' });
+    }
+});
+
+// Serve frontend in production
+const frontendPath = path.resolve(process.cwd(), '..', 'dist');
+(async () => {
+    try {
+        await fs.access(frontendPath);
+        app.use(express.static(frontendPath));
+        app.get('*', (req, res) => {
+            res.sendFile(path.resolve(frontendPath, 'index.html'));
+        });
+        log('INFO', 'Serving frontend from dist/ directory.');
+    } catch {
+        log('WARN', 'dist/ directory not found. Frontend will not be served.');
+    }
+})();
 
 // --- Initialize and Start Server ---
 (async () => {
