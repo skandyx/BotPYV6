@@ -65,7 +65,6 @@ export interface Trade {
   total_entries?: number;
   scaling_in_percents?: number[]; // For flexible scaling in
   strategy_type?: StrategyType; // New: Which strategy triggered the trade
-  is_flash_sl_active?: boolean; // For the new Stop Loss Suiveur ⚡ logic
 
   // Management settings snapshotted at trade entry
   management_settings?: {
@@ -118,21 +117,13 @@ export interface ScannedPair {
     atr_pct_15m?: number; // For dynamic profile selection (volatility)
     
     // --- Realtime Calculated Fields ---
-    score: 'STRONG BUY' | 'BUY' | 'HOLD' | 'COOLDOWN' | 'COMPRESSION' | 'FAKE_BREAKOUT' | 'PENDING_CONFIRMATION' | 'MOMENTUM_BUY' | 'IGNITION_BUY';
+    score: 'STRONG BUY' | 'BUY' | 'HOLD' | 'COOLDOWN' | 'COMPRESSION' | 'FAKE_BREAKOUT' | 'PENDING_CONFIRMATION' | 'MOMENTUM_BUY';
     score_value?: number; // Numerical representation of the score
     trend_score?: number; // Nuanced score of trend strength (0-100)
     conditions?: StrategyConditions;
     conditions_met_count?: number; // From 0 to 8
     is_on_hotlist?: boolean; // New: True if conditions are met for 1m precision entry
     strategy_type?: StrategyType; // New: Which strategy is flagging this pair
-
-    // --- NEW PONDERED STRATEGY FIELDS ---
-    hotlist_score?: number;
-    entry_score?: number;
-    trend_score_4h?: number;
-    trend_score_15m?: number;
-    volume_score?: number;
-    confirmation_5m_score?: number;
 }
 
 

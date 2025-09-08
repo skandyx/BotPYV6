@@ -8,47 +8,78 @@ import Tooltip from '../components/common/Tooltip';
 import Modal from '../components/common/Modal';
 
 // --- TYPES & PROFILES ---
-type ProfileName = 'Sniper' | 'Scalpeur' | 'Chasseur Volatilité';
+type ProfileName = 'Le Sniper' | 'Le Scalpeur' | 'Le Chasseur de Volatilité';
 type ActiveProfile = ProfileName | 'PERSONNALISE';
 
 const profileTooltips: Record<ProfileName, string> = {
-    'Scalpeur': "Optimisé pour les marchés en range (ADX bas). Vise des gains rapides et fréquents avec un SL/TP fixe et serré.",
-    'Chasseur Volatilité': "Conçu pour les marchés en tendance modérée (ADX moyen). Utilise un SL basé sur l'ATR et un trailing stop agressif pour capitaliser sur la volatilité.",
-    'Sniper': "Pour les marchés en forte tendance (ADX haut). Utilise une gestion de trade 'Profit Runner' avec prise de profit partielle, mise à break-even et un trailing stop large pour maximiser les gains sur les grands mouvements."
+    'Le Sniper': "PRUDENT : Vise la qualité maximale. Filtres très stricts et gestion 'Profit Runner' pour laisser courir les gagnants au maximum.",
+    'Le Scalpeur': "ÉQUILIBRÉ : Optimisé pour des gains rapides et constants. Ratio Risque/Récompense faible, idéal pour les marchés en range.",
+    'Le Chasseur de Volatilité': "AGRESSIF : Conçu pour les marchés explosifs. Utilise un mode d'entrée rapide et une gestion du risque adaptée à une forte volatilité."
 };
 
 const settingProfiles: Record<ProfileName, Partial<BotSettings>> = {
-    'Scalpeur': {
-        USE_ATR_STOP_LOSS: false,
-        STOP_LOSS_PCT: 0.3,
-        RISK_REWARD_RATIO: 2.0, // TP = 0.6%
-        USE_PARTIAL_TAKE_PROFIT: false,
-        USE_AUTO_BREAKEVEN: false,
-        USE_ADAPTIVE_TRAILING_STOP: false,
-    },
-    'Chasseur Volatilité': {
+    'Le Sniper': { // PRUDENT
+        POSITION_SIZE_PCT: 2.0,
+        MAX_OPEN_POSITIONS: 3,
+        REQUIRE_STRONG_BUY: true,
+        USE_RSI_SAFETY_FILTER: true,
+        RSI_OVERBOUGHT_THRESHOLD: 65,
+        USE_PARABOLIC_FILTER: true,
+        PARABOLIC_FILTER_PERIOD_MINUTES: 5,
+        PARABOLIC_FILTER_THRESHOLD_PCT: 2.5,
         USE_ATR_STOP_LOSS: true,
         ATR_MULTIPLIER: 1.5,
-        RISK_REWARD_RATIO: 1.5, // TP dynamique
-        USE_PARTIAL_TAKE_PROFIT: false,
-        USE_AUTO_BREAKEVEN: true,
-        BREAKEVEN_TRIGGER_R: 1.0,
-        USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.5,
-        TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
-    },
-    'Sniper': {
-        USE_ATR_STOP_LOSS: true,
-        ATR_MULTIPLIER: 2.0, // Trailing large
-        RISK_REWARD_RATIO: 5.0, // TP large, mais géré par le trailing
         USE_PARTIAL_TAKE_PROFIT: true,
-        PARTIAL_TP_TRIGGER_PCT: 1.0, // Note: Ceci est en % PNL, pas en R. 1% de PNL ici.
+        PARTIAL_TP_TRIGGER_PCT: 0.8,
         PARTIAL_TP_SELL_QTY_PCT: 50,
         USE_AUTO_BREAKEVEN: true,
         BREAKEVEN_TRIGGER_R: 1.0,
+        ADJUST_BREAKEVEN_FOR_FEES: true,
+        TRANSACTION_FEE_PCT: 0.1,
         USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 2.0, // Resserrage plus tardif
+        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.5,
         TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
+        RISK_REWARD_RATIO: 5.0,
+        USE_AGGRESSIVE_ENTRY_LOGIC: false,
+    },
+    'Le Scalpeur': { // EQUILIBRE
+        POSITION_SIZE_PCT: 3.0,
+        MAX_OPEN_POSITIONS: 5,
+        REQUIRE_STRONG_BUY: false,
+        USE_RSI_SAFETY_FILTER: true,
+        RSI_OVERBOUGHT_THRESHOLD: 70,
+        USE_PARABOLIC_FILTER: true,
+        PARABOLIC_FILTER_PERIOD_MINUTES: 5,
+        PARABOLIC_FILTER_THRESHOLD_PCT: 3.5,
+        USE_ATR_STOP_LOSS: false,
+        STOP_LOSS_PCT: 2.0,
+        RISK_REWARD_RATIO: 0.75,
+        USE_PARTIAL_TAKE_PROFIT: false,
+        USE_AUTO_BREAKEVEN: false,
+        ADJUST_BREAKEVEN_FOR_FEES: false,
+        TRANSACTION_FEE_PCT: 0.1,
+        USE_ADAPTIVE_TRAILING_STOP: false,
+        USE_AGGRESSIVE_ENTRY_LOGIC: false,
+    },
+    'Le Chasseur de Volatilité': { // AGRESSIF
+        POSITION_SIZE_PCT: 4.0,
+        MAX_OPEN_POSITIONS: 8,
+        REQUIRE_STRONG_BUY: false,
+        USE_RSI_SAFETY_FILTER: false,
+        RSI_OVERBOUGHT_THRESHOLD: 80,
+        USE_PARABOLIC_FILTER: false,
+        USE_ATR_STOP_LOSS: true,
+        ATR_MULTIPLIER: 2.0,
+        RISK_REWARD_RATIO: 3.0,
+        USE_PARTIAL_TAKE_PROFIT: false,
+        USE_AUTO_BREAKEVEN: true,
+        BREAKEVEN_TRIGGER_R: 2.0,
+        ADJUST_BREAKEVEN_FOR_FEES: true,
+        TRANSACTION_FEE_PCT: 0.1,
+        USE_ADAPTIVE_TRAILING_STOP: true,
+        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.0,
+        TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
+        USE_AGGRESSIVE_ENTRY_LOGIC: true, // Specific to this profile
     }
 };
 
@@ -161,12 +192,12 @@ const SettingsPage: React.FC = () => {
         };
 
         let currentProfile: ActiveProfile = 'PERSONNALISE';
-        if (checkProfile(settingProfiles['Sniper'])) {
-            currentProfile = 'Sniper';
-        } else if (checkProfile(settingProfiles['Scalpeur'])) {
-            currentProfile = 'Scalpeur';
-        } else if (checkProfile(settingProfiles['Chasseur Volatilité'])) {
-            currentProfile = 'Chasseur Volatilité';
+        if (checkProfile(settingProfiles['Le Sniper'])) {
+            currentProfile = 'Le Sniper';
+        } else if (checkProfile(settingProfiles['Le Scalpeur'])) {
+            currentProfile = 'Le Scalpeur';
+        } else if (checkProfile(settingProfiles['Le Chasseur de Volatilité'])) {
+            currentProfile = 'Le Chasseur de Volatilité';
         }
         
         if (currentProfile !== activeProfile) {
@@ -361,7 +392,7 @@ const SettingsPage: React.FC = () => {
                 </div>
                 <div className={`transition-opacity ${settings.USE_DYNAMIC_PROFILE_SELECTOR ? 'opacity-50' : ''}`}>
                     <div className="isolate inline-flex rounded-md shadow-sm">
-                        {(['Scalpeur', 'Chasseur Volatilité', 'Sniper'] as ProfileName[]).map((profile, idx) => (
+                        {(['Le Sniper', 'Le Scalpeur', 'Le Chasseur de Volatilité'] as ProfileName[]).map((profile, idx) => (
                             <button
                                 key={profile}
                                 type="button"
