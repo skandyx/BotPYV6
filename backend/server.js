@@ -658,24 +658,42 @@ class RealtimeAnalyzer {
         const volumeRatio = volumes1m[volumes1m.length - 1] / avgVolume;
         if (volumeRatio > 1.5) {
             score_1m += 2;
-            is_ignition_signal = true;
         }
 
         // Check for Ignition conditions
-        if (rsi_1m.length > 0 && rsi_1m[rsi_1m.length - 1] > 55 && macd_1m.length > 0 && macd_1m[macd_1m.length - 1].MACD > 0) {
+        if (volumeRatio > 1.5 && rsi_1m.length > 0 && rsi_1m[rsi_1m.length - 1] > 55 && macd_1m.length > 0 && macd_1m[macd_1m.length - 1].MACD > 0) {
             is_ignition_signal = true;
         }
+        
+        const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
+        const threshold = strategy_type === 'IGNITION' ? 6 : 8;
+        const triggerCandle = klines1m[klines1m.length-1];
 
-        if(score_1m > 0) { // Only proceed if there is some positive signal
+        // NEW LOGIC: Check if MTF validation is disabled
+        if (tradeSettings.USE_MTF_VALIDATION === false) {
+            if (score_1m >= threshold) {
+                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF validation is OFF. Score ${score_1m} >= ${threshold}. Firing trade.`);
+                const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
+                if (tradeOpened) {
+                    pair.is_on_hotlist = false;
+                    pair.strategy_type = undefined;
+                    removeSymbolFromMicroStreams(symbol);
+                    broadcast({ type: 'SCANNER_UPDATE', payload: pair });
+                }
+            }
+            return;
+        }
+
+        // ORIGINAL LOGIC: MTF validation is enabled, check for any positive signal to start watching
+        if(score_1m > 0) {
             pair.score = 'PENDING_CONFIRMATION';
-            pair.strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
-            const triggerCandle = klines1m[klines1m.length-1];
+            pair.strategy_type = strategy_type;
             botState.pendingConfirmation.set(symbol, {
                 triggerPrice: triggerCandle.close,
                 triggerTimestamp: Date.now(),
                 slPriceReference: triggerCandle.low,
                 settings: tradeSettings,
-                strategy_type: pair.strategy_type,
+                strategy_type: strategy_type,
                 micro_score_1m: score_1m,
             });
             this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Ignition: ${is_ignition_signal}`);
