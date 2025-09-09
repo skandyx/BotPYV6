@@ -99,7 +99,8 @@ wss.on('connection', (ws) => {
 function broadcast(message) {
     const data = JSON.stringify(message);
     if (['SCANNER_UPDATE', 'POSITIONS_UPDATED'].includes(message.type)) {
-        log('WEBSOCKET', `Broadcasting ${message.type} to ${clients.size} clients.`);
+        // This log can be very noisy, let's keep it commented unless needed for debugging.
+        // log('WEBSOCKET', `Broadcasting ${message.type} to ${clients.size} clients.`);
     }
     for (const client of clients) {
         if (client.readyState === WebSocket.OPEN) {
@@ -1030,48 +1031,55 @@ let scannerInterval = null;
 async function runScannerCycle() {
     if (!botState.isRunning) return;
     try {
+        // Phase 1: Discover all pairs meeting basic volume/exclusion criteria.
         const discoveredPairs = await scanner.runScan(botState.settings);
-        if (discoveredPairs.length === 0) {
-            this.log('WARN', 'No pairs found meeting volume/exclusion criteria.');
-            return [];
-        }
-        const newPairsToHydrate = [];
-        const discoveredSymbols = new Set(discoveredPairs.map(p => p.symbol));
-        const existingPairsMap = new Map(botState.scannerCache.map(p => [p.symbol, p]));
 
-        // 1. Update existing pairs from the new scan data, and identify brand new pairs.
-        for (const discoveredPair of discoveredPairs) {
-            const existingPair = existingPairsMap.get(discoveredPair.symbol);
-            if (existingPair) {
-                // The pair already exists in our cache. We update ONLY the background
-                // indicators from the fresh scan, preserving all real-time data
-                // (like score, BB width, etc.) that the RealtimeAnalyzer has calculated.
-                existingPair.volume = discoveredPair.volume;
-                existingPair.price = discoveredPair.price;
-                existingPair.price_above_ema50_4h = discoveredPair.price_above_ema50_4h;
-                existingPair.rsi_1h = discoveredPair.rsi_1h;
-                existingPair.trend_score = discoveredPair.trend_score;
-                existingPair.conditions.trend4h_score = discoveredPair.conditions.trend4h_score;
-            } else {
-                // This is a new pair not seen before. Add it to the main cache
-                // and mark it for historical data hydration.
-                botState.scannerCache.push(discoveredPair);
-                newPairsToHydrate.push(discoveredPair.symbol);
+        if (discoveredPairs.length === 0) {
+            log('SCANNER', 'Scanner cycle found 0 pairs meeting criteria. Clearing cache and hotlist.');
+            botState.scannerCache = [];
+            botState.hotlist.clear();
+        } else {
+            const existingPairsMap = new Map(botState.scannerCache.map(p => [p.symbol, p]));
+            const newScannerCache = [];
+            const newPairsToHydrate = [];
+
+            // Phase 2: Merge new discovery data with existing real-time analysis data to build a new cache.
+            for (const discoveredPair of discoveredPairs) {
+                const existingPairState = existingPairsMap.get(discoveredPair.symbol);
+                if (existingPairState) {
+                    // This pair already exists. We preserve its real-time analysis state (like score, hotlist status, etc.)
+                    // but update it with the fresh background data from the new scan.
+                    const mergedPair = { ...existingPairState, ...discoveredPair };
+                    newScannerCache.push(mergedPair);
+                } else {
+                    // This is a brand new pair not seen before. Add it to the cache and mark it for hydration.
+                    newScannerCache.push(discoveredPair);
+                    newPairsToHydrate.push(discoveredPair.symbol);
+                }
+            }
+
+            botState.scannerCache = newScannerCache;
+
+            // Phase 3: Clean up the hotlist. A symbol should not be on the hotlist if it's no longer in the main scanner cache.
+            const currentSymbols = new Set(botState.scannerCache.map(p => p.symbol));
+            for (const hotSymbol of botState.hotlist) {
+                if (!currentSymbols.has(hotSymbol)) {
+                    botState.hotlist.delete(hotSymbol);
+                    log('SCANNER', `[HOTLIST CLEANUP] Removed ${hotSymbol} as it's no longer in the scanner's scope.`);
+                }
+            }
+            
+            // Phase 4: Asynchronously fetch historical kline data for any brand new pairs.
+            if (newPairsToHydrate.length > 0) {
+                log('INFO', `New symbols detected by scanner: [${newPairsToHydrate.join(', ')}]. Hydrating 15m klines...`);
+                // No 'await' here; let it run in the background to not block the main loop.
+                Promise.all(newPairsToHydrate.map(symbol => realtimeAnalyzer.hydrateSymbol(symbol, '15m')));
             }
         }
-
-        // 2. Remove pairs that are no longer valid (i.e., they were not in the latest scan results)
-        botState.scannerCache = botState.scannerCache.filter(p => discoveredSymbols.has(p.symbol));
-
-        // 3. Asynchronously hydrate the new pairs to get their 15m kline data
-        if (newPairsToHydrate.length > 0) {
-            log('INFO', `New symbols detected by scanner: [${newPairsToHydrate.join(', ')}]. Hydrating...`);
-            await Promise.all(newPairsToHydrate.map(symbol => realtimeAnalyzer.hydrateSymbol(symbol, '15m')));
-        }
-
-        // 4. Update WebSocket subscriptions to match the new final list of monitored pairs
-        updateBinanceSubscriptions(botState.scannerCache.map(p => p.symbol));
         
+        // Phase 5: Always synchronize WebSocket subscriptions with the definitive state of the scanner cache and hotlist.
+        updateBinanceSubscriptions(botState.scannerCache.map(p => p.symbol));
+
     } catch (error) {
         log('ERROR', `Scanner cycle failed: ${error.message}`);
     }
@@ -1286,7 +1294,7 @@ const tradingEngine = {
 
         const riskPerUnit = entryPrice - stopLoss;
         if (riskPerUnit <= 0) {
-            log('TRADE', `[REJECTED] Trade for ${pair.symbol} aborted due to invalid risk. Entry: $${entryPrice}, SL: $${stopLoss}`);
+            log('TRADE', `[REJECTED] Trade for ${pair.symbol} aborted due to invalid risk. Entry: $${entryPrice}, SL: $${stopLoss}, Symbol: ${pair.symbol}`);
             return false;
         }
         
