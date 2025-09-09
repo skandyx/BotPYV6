@@ -35,7 +35,7 @@ app.set('trust proxy', 1); // For Nginx
 
 // --- Session Management ---
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'a_much_more_secure_and_random_secret_string_32_chars_long',
+    secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
     resave: false,
     saveUninitialized: true,
     cookie: {
@@ -188,6 +188,10 @@ let binanceApiClient = null;
 let symbolRules = new Map();
 
 function formatQuantity(symbol, quantity) {
+    if (typeof quantity !== 'number' || !isFinite(quantity) || quantity <= 0) {
+        return 0; // Prevent invalid orders
+    }
+
     const rules = symbolRules.get(symbol);
     if (!rules || !rules.stepSize) {
         // Fallback for symbols without explicit rules (e.g., if exchangeInfo fails)
@@ -790,7 +794,7 @@ class RealtimeAnalyzer {
 
         const klines = this.klineData.get(symbol).get(interval);
         klines.push(kline);
-        if (klines.length > 201) klines.shift();
+        if (klines.length > 1000) klines.shift(); // Increased buffer as requested
         
         if (interval === '15m') {
             this.analyze15mIndicators(symbol);
@@ -829,6 +833,8 @@ let binanceWs = null;
 const BINANCE_WS_URL = 'wss://stream.binance.com:9443/ws';
 const subscribedStreams = new Set();
 let reconnectBinanceWsTimeout = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 60000; // 1 minute
 
 function connectToBinanceStreams() {
     if (binanceWs && (binanceWs.readyState === WebSocket.OPEN || binanceWs.readyState === WebSocket.CONNECTING)) {
@@ -841,6 +847,7 @@ function connectToBinanceStreams() {
 
     binanceWs.on('open', () => {
         log('BINANCE_WS', 'Connected. Subscribing to streams...');
+        reconnectAttempts = 0; // Reset on successful connection
         if (subscribedStreams.size > 0) {
             const streams = Array.from(subscribedStreams);
             const payload = { method: "SUBSCRIBE", params: streams, id: 1 };
@@ -891,9 +898,11 @@ function connectToBinanceStreams() {
     });
 
     binanceWs.on('close', () => {
-        log('WARN', 'Binance WebSocket disconnected. Reconnecting in 5s...');
         binanceWs = null;
-        reconnectBinanceWsTimeout = setTimeout(connectToBinanceStreams, 5000);
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+        log('WARN', `Binance WebSocket disconnected. Reconnecting in ${delay / 1000}s... (Attempt ${reconnectAttempts})`);
+        reconnectBinanceWsTimeout = setTimeout(connectToBinanceStreams, delay);
     });
     binanceWs.on('error', (err) => log('ERROR', `Binance WebSocket error: ${err.message}`));
 }
@@ -979,16 +988,17 @@ const CRYPTO_SECTORS = {
     // Layer 1
     'BTC': 'L1', 'ETH': 'L1', 'BNB': 'L1', 'SOL': 'L1', 'ADA': 'L1', 'AVAX': 'L1',
     'DOT': 'L1', 'TRX': 'L1', 'NEAR': 'L1', 'APT': 'L1', 'ALGO': 'L1', 'FTM': 'L1',
-    'SUI': 'L1', 'SEI': 'L1', 'ATOM': 'L1', 'ICP': 'L1',
+    'SUI': 'L1', 'SEI': 'L1', 'ATOM': 'L1', 'ICP': 'L1', 'TIA': 'L1', 'INJ': 'L1',
     // Layer 2
     'MATIC': 'L2', 'OP': 'L2', 'ARB': 'L2', 'IMX': 'L2', 'MANTA': 'L2', 'STRK': 'L2',
     // DeFi
     'UNI': 'DeFi', 'LINK': 'DeFi', 'AAVE': 'DeFi', 'LDO': 'DeFi', 'MKR': 'DeFi',
     'CRV': 'DeFi', 'SUSHI': 'DeFi', 'SNX': 'DeFi', 'COMP': 'DeFi', 'RUNE': 'DeFi',
+    'PYTH': 'DeFi', 'JUP': 'DeFi',
     // Memecoin
     'DOGE': 'Meme', 'SHIB': 'Meme', 'PEPE': 'Meme', 'WIF': 'Meme', 'FLOKI': 'Meme', 'BONK': 'Meme',
     // AI
-    'FET': 'AI', 'RNDR': 'AI', 'AGIX': 'AI', 'GRT': 'AI', 'WLD': 'AI',
+    'FET': 'AI', 'RNDR': 'AI', 'AGIX': 'AI', 'GRT': 'AI', 'WLD': 'AI', 'TAO': 'AI',
     // Gaming / Metaverse
     'AXS': 'Gaming', 'SAND': 'Gaming', 'MANA': 'Gaming', 'GALA': 'Gaming',
     // RWA (Real World Assets)
@@ -1119,255 +1129,263 @@ const settingProfiles = {
     }
 };
 
+let tradeProcessingLock = false;
+
 // --- Trading Engine ---
 const tradingEngine = {
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
-        if (!botState.isRunning) return false;
-        if (botState.circuitBreakerStatus.startsWith('HALTED') || botState.circuitBreakerStatus.startsWith('PAUSED')) {
-            log('TRADE', `[FILTER] Trade for ${pair.symbol} blocked: Global Circuit Breaker is active (${botState.circuitBreakerStatus}).`);
+        if (tradeProcessingLock) {
+            log('TRADE', `[QUEUE] Another trade is being processed. Skipping ${pair.symbol} for now.`);
             return false;
         }
-        
-        const isIgnition = pair.strategy_type === 'IGNITION';
-
-        // --- Liquidity Filter (Bypassed for Ignition) ---
-        if (!isIgnition && tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
-            try {
-                const depth = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair.symbol}&limit=100`).then(res => res.json());
-                const price = pair.price;
-                const range = 0.005; // +/- 0.5%
-                const bidsInScope = depth.bids.filter(b => parseFloat(b[0]) >= price * (1 - range));
-                const asksInScope = depth.asks.filter(a => parseFloat(a[0]) <= price * (1 + range));
-                const totalBidsValue = bidsInScope.reduce((sum, b) => sum + (parseFloat(b[0]) * parseFloat(b[1])), 0);
-                const totalAsksValue = asksInScope.reduce((sum, a) => sum + (parseFloat(a[0]) * parseFloat(a[1])), 0);
-                const totalLiquidity = totalBidsValue + totalAsksValue;
-
-                if (totalLiquidity < tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD) {
-                    log('TRADE', `[LIQUIDITY FILTER] Rejected ${pair.symbol}. Liquidity ($${totalLiquidity.toFixed(0)}) is below threshold ($${tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD}).`);
-                    return false;
-                }
-            } catch (e) {
-                log('ERROR', `[LIQUIDITY FILTER] Failed to fetch order book for ${pair.symbol}: ${e.message}. Skipping trade.`);
-                return false;
-            }
-        }
-        
-        // --- Sector Correlation Filter (Bypassed for Ignition) ---
-        if (!isIgnition && tradeSettings.USE_SECTOR_CORRELATION_FILTER) {
-            const newTradeSector = getSymbolSector(pair.symbol);
-            if (newTradeSector !== 'Other') {
-                const hasOpenTradeInSector = botState.activePositions.some(p => getSymbolSector(p.symbol) === newTradeSector);
-                if (hasOpenTradeInSector) {
-                    log('TRADE', `[SECTOR FILTER] Rejected ${pair.symbol}. A trade in the '${newTradeSector}' sector is already open.`);
-                    return false;
-                }
-            }
-        }
-
-        // --- Correlation Filter (Bypassed for Ignition) ---
-        if (!isIgnition) {
-            const correlatedTrades = botState.activePositions.filter(p => p.symbol !== 'BTCUSDT' && p.symbol !== 'ETHUSDT').length;
-            if (correlatedTrades >= tradeSettings.MAX_CORRELATED_TRADES) {
-                log('TRADE', `[CORRELATION FILTER] Skipped trade for ${pair.symbol}. Max correlated trades (${tradeSettings.MAX_CORRELATED_TRADES}) reached.`);
-                return false;
-            }
-        }
-        
-        // --- RSI Safety Filter (Bypassed for Ignition) ---
-        if (!isIgnition && tradeSettings.USE_RSI_SAFETY_FILTER) {
-            if (pair.rsi_1h === undefined || pair.rsi_1h === null) {
-                log('TRADE', `[RSI FILTER] Skipped trade for ${pair.symbol}. 1h RSI data not available.`);
-                return false;
-            }
-            if (pair.rsi_1h >= tradeSettings.RSI_OVERBOUGHT_THRESHOLD) {
-                log('TRADE', `[RSI FILTER] Skipped trade for ${pair.symbol}. 1h RSI (${pair.rsi_1h.toFixed(2)}) is >= threshold (${tradeSettings.RSI_OVERBOUGHT_THRESHOLD}).`);
-                return false;
-            }
-        }
-
-        // --- Parabolic Filter Check (Bypassed for Ignition) ---
-        if (!isIgnition && tradeSettings.USE_PARABOLIC_FILTER) {
-            const klines1m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1m');
-            if (klines1m && klines1m.length >= tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES) {
-                const checkPeriodKlines = klines1m.slice(-tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES);
-                const startingPrice = checkPeriodKlines[0].open;
-                const currentPrice = pair.price;
-                const priceIncreasePct = ((currentPrice - startingPrice) / startingPrice) * 100;
-
-                if (priceIncreasePct > tradeSettings.PARABOLIC_FILTER_THRESHOLD_PCT) {
-                    log('TRADE', `[PARABOLIC FILTER] Skipped trade for ${pair.symbol}. Price increased by ${priceIncreasePct.toFixed(2)}% in the last ${tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES} minutes, exceeding threshold of ${tradeSettings.PARABOLIC_FILTER_THRESHOLD_PCT}%.`);
-                    return false; // Abort trade
-                }
-            }
-        }
-        
-        const cooldownInfo = botState.recentlyLostSymbols.get(pair.symbol);
-        if (cooldownInfo && Date.now() < cooldownInfo.until) {
-            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol} due to recent loss cooldown.`);
-            pair.score = 'COOLDOWN'; // Ensure state reflects this
-            return false;
-        }
-
-        if (botState.activePositions.length >= tradeSettings.MAX_OPEN_POSITIONS) {
-            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Max open positions (${tradeSettings.MAX_OPEN_POSITIONS}) reached.`);
-            return false;
-        }
-
-        if (botState.activePositions.some(p => p.symbol === pair.symbol)) {
-            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Position already open.`);
-            return false;
-        }
-
-        let entryPrice = pair.price;
-        let positionSizePct = tradeSettings.POSITION_SIZE_PCT;
-        if (tradeSettings.USE_DYNAMIC_POSITION_SIZING && pair.score === 'STRONG BUY') {
-            positionSizePct = tradeSettings.STRONG_BUY_POSITION_SIZE_PCT;
-        }
-        
-        let positionSizeUSD = botState.balance * (positionSizePct / 100);
-        
-        if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP') {
-            positionSizeUSD /= 2;
-            log('WARN', `[CIRCUIT BREAKER] WARNING ACTIVE. Reducing position size for ${pair.symbol} to $${positionSizeUSD.toFixed(2)}.`);
-        }
-
-        const target_quantity = positionSizeUSD / entryPrice;
-
-        const scalingInPercents = (tradeSettings.SCALING_IN_CONFIG || "").split(',').map(p => parseFloat(p.trim())).filter(p => !isNaN(p) && p > 0);
-        let useScalingIn = !isIgnition && scalingInPercents.length > 0;
-        
-        let initial_quantity = useScalingIn ? (target_quantity * (scalingInPercents[0] / 100)) : target_quantity;
-        let initial_cost = initial_quantity * entryPrice;
-
-        const rules = symbolRules.get(pair.symbol);
-        const minNotionalValue = rules ? rules.minNotional : 5.0; // Use a safe default of 5 USDT
-
-        // --- MIN_NOTIONAL CHECK & ADJUSTMENT ---
-        if (botState.tradingMode === 'REAL_LIVE' && initial_cost < minNotionalValue) {
-            log('WARN', `[MIN_NOTIONAL] Initial order size for ${pair.symbol} ($${initial_cost.toFixed(2)}) is below minimum ($${minNotionalValue}). Adjusting...`);
-            
-            const fullPositionCost = target_quantity * entryPrice;
-
-            if (fullPositionCost < minNotionalValue) {
-                log('ERROR', `[MIN_NOTIONAL] Aborting trade for ${pair.symbol}. Even full position size ($${fullPositionCost.toFixed(2)}) is below minimum notional value ($${minNotionalValue}). Consider increasing POSITION_SIZE_PCT.`);
+        tradeProcessingLock = true;
+        try {
+            if (!botState.isRunning) return false;
+            if (botState.circuitBreakerStatus.startsWith('HALTED') || botState.circuitBreakerStatus.startsWith('PAUSED')) {
+                log('TRADE', `[FILTER] Trade for ${pair.symbol} blocked: Global Circuit Breaker is active (${botState.circuitBreakerStatus}).`);
                 return false;
             }
             
-            log('WARN', `[MIN_NOTIONAL] Disabling scaling-in for this trade to meet minimum notional. Using full position size: $${fullPositionCost.toFixed(2)}.`);
-            initial_quantity = target_quantity;
-            initial_cost = fullPositionCost;
-            useScalingIn = false; // Override for this trade
-        }
-        
-        // --- REAL TRADE EXECUTION ---
-        if (botState.tradingMode === 'REAL_LIVE') {
-            if (!binanceApiClient) {
-                log('ERROR', `[REAL_LIVE] Cannot open trade for ${pair.symbol}. Binance API client not initialized.`);
+            const isIgnition = pair.strategy_type === 'IGNITION';
+    
+            // --- Liquidity Filter (Bypassed for Ignition) ---
+            if (!isIgnition && tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
+                try {
+                    const depth = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair.symbol}&limit=100`).then(res => res.json());
+                    const price = pair.price;
+                    const range = 0.005; // +/- 0.5%
+                    const bidsInScope = depth.bids.filter(b => parseFloat(b[0]) >= price * (1 - range));
+                    const asksInScope = depth.asks.filter(a => parseFloat(a[0]) <= price * (1 + range));
+                    const totalBidsValue = bidsInScope.reduce((sum, b) => sum + (parseFloat(b[0]) * parseFloat(b[1])), 0);
+                    const totalAsksValue = asksInScope.reduce((sum, a) => sum + (parseFloat(a[0]) * parseFloat(a[1])), 0);
+                    const totalLiquidity = totalBidsValue + totalAsksValue;
+    
+                    if (totalLiquidity < tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD) {
+                        log('TRADE', `[LIQUIDITY FILTER] Rejected ${pair.symbol}. Liquidity ($${totalLiquidity.toFixed(0)}) is below threshold ($${tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD}).`);
+                        return false;
+                    }
+                } catch (e) {
+                    log('ERROR', `[LIQUIDITY FILTER] Failed to fetch order book for ${pair.symbol}: ${e.message}. Skipping trade.`);
+                    return false;
+                }
+            }
+            
+            // --- Sector Correlation Filter (Bypassed for Ignition) ---
+            if (!isIgnition && tradeSettings.USE_SECTOR_CORRELATION_FILTER) {
+                const newTradeSector = getSymbolSector(pair.symbol);
+                if (newTradeSector !== 'Other') {
+                    const hasOpenTradeInSector = botState.activePositions.some(p => getSymbolSector(p.symbol) === newTradeSector);
+                    if (hasOpenTradeInSector) {
+                        log('TRADE', `[SECTOR FILTER] Rejected ${pair.symbol}. A trade in the '${newTradeSector}' sector is already open.`);
+                        return false;
+                    }
+                }
+            }
+    
+            // --- Correlation Filter (Bypassed for Ignition) ---
+            if (!isIgnition) {
+                const correlatedTrades = botState.activePositions.filter(p => p.symbol !== 'BTCUSDT' && p.symbol !== 'ETHUSDT').length;
+                if (correlatedTrades >= tradeSettings.MAX_CORRELATED_TRADES) {
+                    log('TRADE', `[CORRELATION FILTER] Skipped trade for ${pair.symbol}. Max correlated trades (${tradeSettings.MAX_CORRELATED_TRADES}) reached.`);
+                    return false;
+                }
+            }
+            
+            // --- RSI Safety Filter (Bypassed for Ignition) ---
+            if (!isIgnition && tradeSettings.USE_RSI_SAFETY_FILTER) {
+                if (pair.rsi_1h === undefined || pair.rsi_1h === null) {
+                    log('TRADE', `[RSI FILTER] Skipped trade for ${pair.symbol}. 1h RSI data not available.`);
+                    return false;
+                }
+                if (pair.rsi_1h >= tradeSettings.RSI_OVERBOUGHT_THRESHOLD) {
+                    log('TRADE', `[RSI FILTER] Skipped trade for ${pair.symbol}. 1h RSI (${pair.rsi_1h.toFixed(2)}) is >= threshold (${tradeSettings.RSI_OVERBOUGHT_THRESHOLD}).`);
+                    return false;
+                }
+            }
+    
+            // --- Parabolic Filter Check (Bypassed for Ignition) ---
+            if (!isIgnition && tradeSettings.USE_PARABOLIC_FILTER) {
+                const klines1m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1m');
+                if (klines1m && klines1m.length >= tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES) {
+                    const checkPeriodKlines = klines1m.slice(-tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES);
+                    const startingPrice = checkPeriodKlines[0].open;
+                    const currentPrice = pair.price;
+                    const priceIncreasePct = ((currentPrice - startingPrice) / startingPrice) * 100;
+    
+                    if (priceIncreasePct > tradeSettings.PARABOLIC_FILTER_THRESHOLD_PCT) {
+                        log('TRADE', `[PARABOLIC FILTER] Skipped trade for ${pair.symbol}. Price increased by ${priceIncreasePct.toFixed(2)}% in the last ${tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES} minutes, exceeding threshold of ${tradeSettings.PARABOLIC_FILTER_THRESHOLD_PCT}%.`);
+                        return false; // Abort trade
+                    }
+                }
+            }
+            
+            const cooldownInfo = botState.recentlyLostSymbols.get(pair.symbol);
+            if (cooldownInfo && Date.now() < cooldownInfo.until) {
+                log('TRADE', `[FILTER] Skipping trade for ${pair.symbol} due to recent trade cooldown.`);
+                pair.score = 'COOLDOWN'; // Ensure state reflects this
                 return false;
             }
-            try {
-                const formattedQty = formatQuantity(pair.symbol, initial_quantity);
-                log('TRADE', `>>> [REAL_LIVE] FIRING TRADE <<< Attempting to BUY ${formattedQty} ${pair.symbol} at MARKET price.`);
-                const orderResult = await binanceApiClient.createOrder(pair.symbol, 'BUY', 'MARKET', formattedQty);
-                log('BINANCE_API', `[REAL_LIVE] Order successful for ${pair.symbol}. Order ID: ${orderResult.orderId}`);
+    
+            if (botState.activePositions.length >= tradeSettings.MAX_OPEN_POSITIONS) {
+                log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Max open positions (${tradeSettings.MAX_OPEN_POSITIONS}) reached.`);
+                return false;
+            }
+    
+            if (botState.activePositions.some(p => p.symbol === pair.symbol)) {
+                log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Position already open.`);
+                return false;
+            }
+    
+            let entryPrice = pair.price;
+            let positionSizePct = tradeSettings.POSITION_SIZE_PCT;
+            if (tradeSettings.USE_DYNAMIC_POSITION_SIZING && pair.score === 'STRONG BUY') {
+                positionSizePct = tradeSettings.STRONG_BUY_POSITION_SIZE_PCT;
+            }
+            
+            let positionSizeUSD = botState.balance * (positionSizePct / 100);
+            
+            if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP') {
+                positionSizeUSD /= 2;
+                log('WARN', `[CIRCUIT BREAKER] WARNING ACTIVE. Reducing position size for ${pair.symbol} to $${positionSizeUSD.toFixed(2)}.`);
+            }
+    
+            const target_quantity = positionSizeUSD / entryPrice;
+    
+            const scalingInPercents = (tradeSettings.SCALING_IN_CONFIG || "").split(',').map(p => parseFloat(p.trim())).filter(p => !isNaN(p) && p > 0);
+            let useScalingIn = !isIgnition && scalingInPercents.length > 0;
+            
+            let initial_quantity = useScalingIn ? (target_quantity * (scalingInPercents[0] / 100)) : target_quantity;
+            let initial_cost = initial_quantity * entryPrice;
+    
+            const rules = symbolRules.get(pair.symbol);
+            const minNotionalValue = rules ? rules.minNotional : 5.0; // Use a safe default of 5 USDT
+    
+            // --- MIN_NOTIONAL CHECK & ADJUSTMENT ---
+            if (botState.tradingMode === 'REAL_LIVE' && initial_cost < minNotionalValue) {
+                log('WARN', `[MIN_NOTIONAL] Initial order size for ${pair.symbol} ($${initial_cost.toFixed(2)}) is below minimum ($${minNotionalValue}). Adjusting...`);
                 
-                // === BUG FIX: Use actual fill price instead of cached price ===
-                const executedQty = parseFloat(orderResult.executedQty);
-                if (executedQty > 0) {
-                    const cummulativeQuoteQty = parseFloat(orderResult.cummulativeQuoteQty);
-                    entryPrice = cummulativeQuoteQty / executedQty;
-                    log('TRADE', `[REAL_LIVE] Actual average entry price for ${pair.symbol} is $${entryPrice.toFixed(4)}.`);
-                } else {
-                    log('ERROR', `[REAL_LIVE] Order for ${pair.symbol} was successful but executed quantity is zero. Aborting trade.`);
+                const fullPositionCost = target_quantity * entryPrice;
+    
+                if (fullPositionCost < minNotionalValue) {
+                    log('ERROR', `[MIN_NOTIONAL] Aborting trade for ${pair.symbol}. Even full position size ($${fullPositionCost.toFixed(2)}) is below minimum notional value ($${minNotionalValue}). Consider increasing POSITION_SIZE_PCT.`);
                     return false;
                 }
-
-            } catch (error) {
-                log('ERROR', `[REAL_LIVE] FAILED to place order for ${pair.symbol}. Error: ${error.message}. Aborting trade.`);
+                
+                log('WARN', `[MIN_NOTIONAL] Disabling scaling-in for this trade to meet minimum notional. Using full position size: $${fullPositionCost.toFixed(2)}.`);
+                initial_quantity = target_quantity;
+                initial_cost = fullPositionCost;
+                useScalingIn = false; // Override for this trade
+            }
+            
+            // --- REAL TRADE EXECUTION ---
+            if (botState.tradingMode === 'REAL_LIVE') {
+                if (!binanceApiClient) {
+                    log('ERROR', `[REAL_LIVE] Cannot open trade for ${pair.symbol}. Binance API client not initialized.`);
+                    return false;
+                }
+                try {
+                    const formattedQty = formatQuantity(pair.symbol, initial_quantity);
+                    log('TRADE', `>>> [REAL_LIVE] FIRING TRADE <<< Attempting to BUY ${formattedQty} ${pair.symbol} at MARKET price.`);
+                    const orderResult = await binanceApiClient.createOrder(pair.symbol, 'BUY', 'MARKET', formattedQty);
+                    log('BINANCE_API', `[REAL_LIVE] Order successful for ${pair.symbol}. Order ID: ${orderResult.orderId}`);
+                    
+                    const executedQty = parseFloat(orderResult.executedQty);
+                    if (executedQty > 0) {
+                        const cummulativeQuoteQty = parseFloat(orderResult.cummulativeQuoteQty);
+                        entryPrice = cummulativeQuoteQty / executedQty;
+                        log('TRADE', `[REAL_LIVE] Actual average entry price for ${pair.symbol} is $${entryPrice.toFixed(4)}.`);
+                    } else {
+                        log('ERROR', `[REAL_LIVE] Order for ${pair.symbol} was successful but executed quantity is zero. Aborting trade.`);
+                        return false;
+                    }
+    
+                } catch (error) {
+                    log('ERROR', `[REAL_LIVE] FAILED to place order for ${pair.symbol}. Error: ${error.message}. Aborting trade.`);
+                    return false;
+                }
+            }
+    
+            let stopLoss;
+            if (isIgnition) {
+                stopLoss = slPriceReference;
+            } else if (tradeSettings.USE_ATR_STOP_LOSS && pair.atr_15m) {
+                stopLoss = entryPrice - (pair.atr_15m * tradeSettings.ATR_MULTIPLIER);
+            } else {
+                stopLoss = entryPrice * (1 - (tradeSettings.STOP_LOSS_PCT / 100));
+            }
+    
+            const riskPerUnit = entryPrice - stopLoss;
+            if (riskPerUnit <= 0) {
+                log('TRADE', `[REJECTED] Trade for ${pair.symbol} aborted due to invalid risk. Entry: $${entryPrice}, SL: $${stopLoss}, Symbol: ${pair.symbol}`);
                 return false;
             }
-        }
-
-        let stopLoss;
-        if (isIgnition) {
-            // For Ignition, SL is the low of the trigger candle. Flash Trailing SL will manage it from there.
-            stopLoss = slPriceReference;
-        } else if (tradeSettings.USE_ATR_STOP_LOSS && pair.atr_15m) {
-            stopLoss = entryPrice - (pair.atr_15m * tradeSettings.ATR_MULTIPLIER);
-        } else {
-            // This is for fixed percentage SL (e.g. Scalpeur profile)
-            stopLoss = entryPrice * (1 - (tradeSettings.STOP_LOSS_PCT / 100));
-        }
-
-        const riskPerUnit = entryPrice - stopLoss;
-        if (riskPerUnit <= 0) {
-            log('TRADE', `[REJECTED] Trade for ${pair.symbol} aborted due to invalid risk. Entry: $${entryPrice}, SL: $${stopLoss}, Symbol: ${pair.symbol}`);
-            return false;
-        }
-        
-        const takeProfit = entryPrice + (riskPerUnit * tradeSettings.RISK_REWARD_RATIO);
-        
-        const newTrade = {
-            id: null, // DB will assign ID
-            mode: botState.tradingMode,
-            symbol: pair.symbol,
-            side: 'BUY',
-            entry_price: entryPrice,
-            average_entry_price: entryPrice,
-            quantity: initial_quantity,
-            target_quantity: target_quantity,
-            total_cost_usd: initial_cost,
-            stop_loss: stopLoss,
-            initial_stop_loss: stopLoss,
-            take_profit: takeProfit,
-            highest_price_since_entry: entryPrice,
-            entry_time: new Date().toISOString(),
-            status: 'FILLED',
-            entry_snapshot: { ...pair },
-            is_at_breakeven: false,
-            partial_tp_hit: false,
-            realized_pnl: 0,
-            trailing_stop_tightened: false,
-            is_scaling_in: useScalingIn && scalingInPercents.length > 1,
-            current_entry_count: 1,
-            total_entries: useScalingIn ? scalingInPercents.length : 1,
-            scaling_in_percents: scalingInPercents,
-            strategy_type: pair.strategy_type,
-            management_settings: {
-                USE_AUTO_BREAKEVEN: tradeSettings.USE_AUTO_BREAKEVEN,
-                BREAKEVEN_TRIGGER_R: tradeSettings.BREAKEVEN_TRIGGER_R,
-                ADJUST_BREAKEVEN_FOR_FEES: tradeSettings.ADJUST_BREAKEVEN_FOR_FEES,
-                TRANSACTION_FEE_PCT: tradeSettings.TRANSACTION_FEE_PCT,
-                USE_ADAPTIVE_TRAILING_STOP: tradeSettings.USE_ADAPTIVE_TRAILING_STOP,
-                ATR_MULTIPLIER: tradeSettings.ATR_MULTIPLIER,
-                TRAILING_STOP_TIGHTEN_THRESHOLD_R: tradeSettings.TRAILING_STOP_TIGHTEN_THRESHOLD_R,
-                TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: tradeSettings.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION,
-                USE_FLASH_TRAILING_STOP: tradeSettings.USE_FLASH_TRAILING_STOP,
-                FLASH_TRAILING_STOP_PCT: tradeSettings.FLASH_TRAILING_STOP_PCT,
-                USE_PARTIAL_TAKE_PROFIT: tradeSettings.USE_PARTIAL_TAKE_PROFIT,
-                PARTIAL_TP_TRIGGER_PCT: tradeSettings.PARTIAL_TP_TRIGGER_PCT,
-                PARTIAL_TP_SELL_QTY_PCT: tradeSettings.PARTIAL_TP_SELL_QTY_PCT,
+            
+            const takeProfit = entryPrice + (riskPerUnit * tradeSettings.RISK_REWARD_RATIO);
+            
+            const newTrade = {
+                id: null,
+                mode: botState.tradingMode,
+                symbol: pair.symbol,
+                side: 'BUY',
+                entry_price: entryPrice,
+                average_entry_price: entryPrice,
+                quantity: initial_quantity,
+                target_quantity: target_quantity,
+                total_cost_usd: initial_cost,
+                stop_loss: stopLoss,
+                initial_stop_loss: stopLoss,
+                take_profit: takeProfit,
+                highest_price_since_entry: entryPrice,
+                entry_time: new Date().toISOString(),
+                status: 'FILLED',
+                entry_snapshot: { ...pair },
+                is_at_breakeven: false,
+                partial_tp_hit: false,
+                realized_pnl: 0,
+                trailing_stop_tightened: false,
+                is_scaling_in: useScalingIn && scalingInPercents.length > 1,
+                current_entry_count: 1,
+                total_entries: useScalingIn ? scalingInPercents.length : 1,
+                scaling_in_percents: scalingInPercents,
+                strategy_type: pair.strategy_type,
+                management_settings: {
+                    USE_AUTO_BREAKEVEN: tradeSettings.USE_AUTO_BREAKEVEN,
+                    BREAKEVEN_TRIGGER_R: tradeSettings.BREAKEVEN_TRIGGER_R,
+                    ADJUST_BREAKEVEN_FOR_FEES: tradeSettings.ADJUST_BREAKEVEN_FOR_FEES,
+                    TRANSACTION_FEE_PCT: tradeSettings.TRANSACTION_FEE_PCT,
+                    USE_ADAPTIVE_TRAILING_STOP: tradeSettings.USE_ADAPTIVE_TRAILING_STOP,
+                    ATR_MULTIPLIER: tradeSettings.ATR_MULTIPLIER,
+                    TRAILING_STOP_TIGHTEN_THRESHOLD_R: tradeSettings.TRAILING_STOP_TIGHTEN_THRESHOLD_R,
+                    TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: tradeSettings.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION,
+                    USE_FLASH_TRAILING_STOP: tradeSettings.USE_FLASH_TRAILING_STOP,
+                    FLASH_TRAILING_STOP_PCT: tradeSettings.FLASH_TRAILING_STOP_PCT,
+                    USE_PARTIAL_TAKE_PROFIT: tradeSettings.USE_PARTIAL_TAKE_PROFIT,
+                    PARTIAL_TP_TRIGGER_PCT: tradeSettings.PARTIAL_TP_TRIGGER_PCT,
+                    PARTIAL_TP_SELL_QTY_PCT: tradeSettings.PARTIAL_TP_SELL_QTY_PCT,
+                }
+            };
+    
+            const dbTrade = prepareTradeForDb(newTrade);
+            const { id, ...dbTradeToInsert } = dbTrade;
+            const columns = Object.keys(dbTradeToInsert).join(', ');
+            const placeholders = Object.keys(dbTradeToInsert).map(() => '?').join(', ');
+    
+            const result = await db.run(`INSERT INTO trades (${columns}) VALUES (${placeholders})`, Object.values(dbTradeToInsert));
+            newTrade.id = result.lastID;
+            botState.activePositions.push(newTrade);
+            
+            if (botState.tradingMode === 'VIRTUAL') {
+                botState.balance -= initial_cost;
+                await setKeyValue('balance', botState.balance);
             }
-        };
-
-        const dbTrade = prepareTradeForDb(newTrade);
-        const { id, ...dbTradeToInsert } = dbTrade; // Exclude null id
-        const columns = Object.keys(dbTradeToInsert).join(', ');
-        const placeholders = Object.keys(dbTradeToInsert).map(() => '?').join(', ');
-
-        const result = await db.run(`INSERT INTO trades (${columns}) VALUES (${placeholders})`, Object.values(dbTradeToInsert));
-        newTrade.id = result.lastID;
-        botState.activePositions.push(newTrade);
-        
-        if (botState.tradingMode === 'VIRTUAL') {
-            botState.balance -= initial_cost;
-            await setKeyValue('balance', botState.balance);
+    
+            log('TRADE', `>>> TRADE OPENED (ID: ${newTrade.id}, STRATEGY: ${newTrade.strategy_type || 'N/A'}, ENTRY 1/${newTrade.total_entries}) <<< Opening ${botState.tradingMode} trade for ${pair.symbol}: Qty=${initial_quantity.toFixed(4)}, Entry=$${entryPrice}`);
+            
+            broadcast({ type: 'POSITIONS_UPDATED' });
+            return true;
+        } finally {
+            tradeProcessingLock = false;
         }
-
-        log('TRADE', `>>> TRADE OPENED (ID: ${newTrade.id}, STRATEGY: ${newTrade.strategy_type || 'N/A'}, ENTRY 1/${newTrade.total_entries}) <<< Opening ${botState.tradingMode} trade for ${pair.symbol}: Qty=${initial_quantity.toFixed(4)}, Entry=$${entryPrice}`);
-        
-        broadcast({ type: 'POSITIONS_UPDATED' });
-        return true;
     },
 
     async scaleInPosition(position, newPrice, tradeSettings) {
@@ -1656,7 +1674,7 @@ const tradingEngine = {
         await checkGlobalSafetyRules();
         botState.tradeHistory.push(trade);
         
-        if (pnl < 0 && botState.settings.LOSS_COOLDOWN_HOURS > 0) {
+        if (botState.settings.LOSS_COOLDOWN_HOURS > 0) {
             const cooldownUntil = Date.now() + botState.settings.LOSS_COOLDOWN_HOURS * 60 * 60 * 1000;
             botState.recentlyLostSymbols.set(trade.symbol, { until: cooldownUntil });
             log('TRADE', `[${trade.symbol}] placed on cooldown until ${new Date(cooldownUntil).toLocaleString()}`);
@@ -1667,10 +1685,29 @@ const tradingEngine = {
     },
     
     async executePartialSell(position, currentPrice, settings) {
-        if (position.mode !== 'VIRTUAL') return;
-
         const sellQty = position.target_quantity * (settings.PARTIAL_TP_SELL_QTY_PCT / 100);
-        const pnlFromSale = (currentPrice - position.average_entry_price) * sellQty;
+        let actualSellPrice = currentPrice;
+
+        if (position.mode === 'REAL_LIVE') {
+            if (!binanceApiClient) {
+                log('ERROR', `[REAL_LIVE] Cannot execute partial sell for ${position.symbol}. API client not initialized.`);
+                return;
+            }
+            try {
+                const formattedQty = formatQuantity(position.symbol, sellQty);
+                log('TRADE', `[PARTIAL TP - REAL_LIVE] Attempting to SELL ${formattedQty} ${position.symbol} at MARKET.`);
+                const orderResult = await binanceApiClient.createOrder(position.symbol, 'SELL', 'MARKET', formattedQty);
+                log('BINANCE_API', `[PARTIAL TP - REAL_LIVE] Partial sell order successful for ${position.symbol}. ID: ${orderResult.orderId}`);
+                if (parseFloat(orderResult.executedQty) > 0) {
+                    actualSellPrice = parseFloat(orderResult.cummulativeQuoteQty) / parseFloat(orderResult.executedQty);
+                }
+            } catch (error) {
+                log('ERROR', `[PARTIAL TP - REAL_LIVE] FAILED to place partial sell order for ${position.symbol}. Error: ${error.message}.`);
+                return; // Do not update state if the order fails
+            }
+        }
+
+        const pnlFromSale = (actualSellPrice - position.average_entry_price) * sellQty;
 
         position.quantity -= sellQty;
         position.total_cost_usd -= position.average_entry_price * sellQty;
@@ -1681,7 +1718,7 @@ const tradingEngine = {
             'UPDATE trades SET quantity = ?, total_cost_usd = ?, realized_pnl = ?, partial_tp_hit = 1 WHERE id = ?',
             position.quantity, position.total_cost_usd, position.realized_pnl, position.id
         );
-        log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${currentPrice}. Realized PnL: $${pnlFromSale.toFixed(2)}`);
+        log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${actualSellPrice.toFixed(4)}. Realized PnL: $${pnlFromSale.toFixed(2)}`);
     }
 };
 
@@ -1867,7 +1904,31 @@ app.get('/api/settings', requireAuth, (req, res) => {
 
 app.post('/api/settings', requireAuth, async (req, res) => {
     const oldSettings = { ...botState.settings };
-    botState.settings = { ...botState.settings, ...req.body };
+    const newSettings = req.body;
+    
+    // Basic validation
+    for (const key in newSettings) {
+        if (Object.prototype.hasOwnProperty.call(botState.settings, key)) {
+            const expectedType = typeof botState.settings[key];
+            const receivedValue = newSettings[key];
+            const receivedType = typeof receivedValue;
+
+            if (expectedType !== receivedType) {
+                if (expectedType === 'number' && (receivedType === 'string' || receivedType === 'undefined')) {
+                    const parsed = parseFloat(receivedValue);
+                    if (!isNaN(parsed)) {
+                        newSettings[key] = parsed;
+                    } else {
+                        return res.status(400).json({ message: `Invalid value for ${key}. Expected a number.` });
+                    }
+                } else {
+                     return res.status(400).json({ message: `Invalid type for ${key}. Expected ${expectedType}, got ${receivedType}.` });
+                }
+            }
+        }
+    }
+    
+    botState.settings = { ...botState.settings, ...newSettings };
     
     if (botState.tradingMode === 'VIRTUAL' && botState.settings.INITIAL_VIRTUAL_BALANCE !== oldSettings.INITIAL_VIRTUAL_BALANCE) {
         botState.balance = botState.settings.INITIAL_VIRTUAL_BALANCE;
