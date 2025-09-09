@@ -676,7 +676,7 @@ class RealtimeAnalyzer {
         if (tradeSettings.USE_MTF_VALIDATION === false) {
             const directTradeThreshold = is_ignition_signal ? 3 : 4;
             if (score_1m >= directTradeThreshold) {
-                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF for ${symbol}. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
+                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF for ${symbol}. Score ${score_1m} >= ${directTradeThreshold}. Evaluating trade entry.`);
                 const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
                 if (tradeOpened) {
                     pair.is_on_hotlist = false;
@@ -1140,7 +1140,10 @@ const tradingEngine = {
         }
         tradeProcessingLock = true;
         try {
-            if (!botState.isRunning) return false;
+            if (!botState.isRunning) {
+                log('TRADE', `[FILTER] Trade for ${pair.symbol} rejected: Bot is not running.`);
+                return false;
+            }
             if (botState.circuitBreakerStatus.startsWith('HALTED') || botState.circuitBreakerStatus.startsWith('PAUSED')) {
                 log('TRADE', `[FILTER] Trade for ${pair.symbol} blocked: Global Circuit Breaker is active (${botState.circuitBreakerStatus}).`);
                 return false;
