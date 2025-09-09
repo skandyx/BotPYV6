@@ -1047,9 +1047,16 @@ async function runScannerCycle() {
             for (const discoveredPair of discoveredPairs) {
                 const existingPairState = existingPairsMap.get(discoveredPair.symbol);
                 if (existingPairState) {
-                    // This pair already exists. We preserve its real-time analysis state (like score, hotlist status, etc.)
-                    // but update it with the fresh background data from the new scan.
-                    const mergedPair = { ...existingPairState, ...discoveredPair };
+                    // CORRECTED MERGE LOGIC: Prioritize existing real-time state over background scan data.
+                    const mergedPair = {
+                        ...existingPairState, // Keep all real-time analysis state (like is_on_hotlist, scores, etc.)
+                        ...discoveredPair,    // Overwrite with fresh background data (volume, price, 4h analysis)
+                        // Deep merge the 'conditions' object to ensure new 4h score is updated without losing real-time scores.
+                        conditions: {
+                            ...existingPairState.conditions,
+                            ...discoveredPair.conditions,
+                        }
+                    };
                     newScannerCache.push(mergedPair);
                 } else {
                     // This is a brand new pair not seen before. Add it to the cache and mark it for hydration.
@@ -1289,7 +1296,7 @@ const tradingEngine = {
             stopLoss = entryPrice - (pair.atr_15m * tradeSettings.ATR_MULTIPLIER);
         } else {
             // This is for fixed percentage SL (e.g. Scalpeur profile)
-            stopLoss = entryPrice * (1 - tradeSettings.STOP_LOSS_PCT / 100);
+            stopLoss = entryPrice * (1 - (tradeSettings.STOP_LOSS_PCT / 100));
         }
 
         const riskPerUnit = entryPrice - stopLoss;
