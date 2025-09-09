@@ -665,14 +665,17 @@ class RealtimeAnalyzer {
             is_ignition_signal = true;
         }
         
-        const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
-        const threshold = strategy_type === 'IGNITION' ? 6 : 8;
         const triggerCandle = klines1m[klines1m.length-1];
 
-        // NEW LOGIC: Check if MTF validation is disabled
+        // --- LOGIC REFACTORED FOR CLARITY AND CORRECTNESS ---
+
+        // Case 1: MTF Validation is DISABLED. We evaluate the trade directly on the 1m signal.
         if (tradeSettings.USE_MTF_VALIDATION === false) {
-            if (score_1m >= threshold) {
-                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF validation is OFF. Score ${score_1m} >= ${threshold}. Firing trade.`);
+            // The threshold must be achievable by the 1m score alone. Max 1m score is 5.
+            // A score of 4 or 5 is a very strong 1m signal.
+            const directTradeThreshold = 4;
+            if (score_1m >= directTradeThreshold) {
+                this.log('TRADE', `[DIRECT TRIGGER 1m - ${is_ignition_signal ? 'IGNITION' : 'PRECISION'}] MTF validation is OFF. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
                 const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
                 if (tradeOpened) {
                     pair.is_on_hotlist = false;
@@ -681,11 +684,14 @@ class RealtimeAnalyzer {
                     broadcast({ type: 'SCANNER_UPDATE', payload: pair });
                 }
             }
-            return;
+            return; // Stop further processing for this candle
         }
-
-        // ORIGINAL LOGIC: MTF validation is enabled, check for any positive signal to start watching
-        if(score_1m > 0) {
+        
+        // Case 2: MTF Validation is ENABLED. We check for a reasonably strong 1m signal to put into pending.
+        // A score of 1 is too weak and creates noise. Let's require at least 3.
+        const pendingThreshold = 3;
+        if (score_1m >= pendingThreshold) {
+            const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
             pair.score = 'PENDING_CONFIRMATION';
             pair.strategy_type = strategy_type;
             botState.pendingConfirmation.set(symbol, {
