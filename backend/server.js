@@ -520,7 +520,7 @@ class RealtimeAnalyzer {
             ? botState.scannerCache.find(p => p.symbol === symbol)
             : symbolOrPair;
 
-        if (!pairToUpdate || !pairToUpdate.conditions?.trend4h_score) return;
+        if (!pairToUpdate || typeof pairToUpdate.conditions?.trend4h_score !== 'number') return;
 
         const klines15m = this.klineData.get(symbol)?.get('15m');
         if (!klines15m || klines15m.length < 200) return;
@@ -541,18 +541,18 @@ class RealtimeAnalyzer {
         const atrInput = { high: highs15m, low: lows15m, close: closes15m, period: 14 };
         const atr15m = ATR.calculate(atrInput).pop();
         const atr_pct_15m = atr15m ? (atr15m / lastClose15m) * 100 : undefined;
-
         const bbInput = { period: 20, values: closes15m, stdDev: 2 };
         const bbResult = BollingerBands.calculate(bbInput);
         const lastBb = bbResult.length > 0 ? bbResult[bbResult.length - 1] : null;
         let bb_width_pct, is_in_squeeze_15m = false;
         if (lastBb && lastBb.middle > 0) {
             bb_width_pct = ((lastBb.upper - lastBb.lower) / lastBb.middle) * 100;
-            // A simple squeeze check: width is less than 3%
             is_in_squeeze_15m = bb_width_pct < 3.0;
         }
         
-        // --- 15m Trend Score ---
+        // --- NEW SCORING LOGIC ---
+        
+        // 1. 15m Trend Score (-2 to +2)
         let trend15m_score = 0;
         const ema50_15m = EMA.calculate({ period: 50, values: closes15m }).pop();
         const ema200_15m = EMA.calculate({ period: 200, values: closes15m }).pop();
@@ -563,7 +563,7 @@ class RealtimeAnalyzer {
         if(macd_15m && macd_15m.MACD > macd_15m.signal) trend15m_score += 0.5; else if(macd_15m && macd_15m.MACD < macd_15m.signal) trend15m_score -= 0.5;
         trend15m_score = Math.max(-2, Math.min(2, trend15m_score));
 
-        // --- Relative Volume Score ---
+        // 2. Relative Volume Score (+1 to +3)
         const avgVolume = volumes15m.slice(-97, -1).reduce((sum, v) => sum + v, 0) / 96; // 24h average
         const lastVolume = volumes15m[volumes15m.length - 1];
         let volume_score = 0;
@@ -572,8 +572,8 @@ class RealtimeAnalyzer {
         else if (volumeRatio > 1.5) volume_score = 2;
         else if (volumeRatio > 1.3) volume_score = 1;
 
-        // --- BTC/ETH Correlation (simplified) ---
-        let btc_corr_score = 1; // Default to +1 as per spec for now.
+        // 3. BTC/ETH Correlation Score (simplified to +1)
+        let btc_corr_score = 1;
         
         const hotlist_score = pairToUpdate.conditions.trend4h_score + trend15m_score + volume_score + btc_corr_score;
         const isOnHotlist = hotlist_score >= 5;
@@ -590,12 +590,11 @@ class RealtimeAnalyzer {
             width_pct: bb_width_pct
         };
         pairToUpdate.is_in_squeeze_15m = is_in_squeeze_15m;
-
         pairToUpdate.is_on_hotlist = isOnHotlist;
         pairToUpdate.conditions.trend15m_score = trend15m_score;
         pairToUpdate.conditions.volume_score = volume_score;
         pairToUpdate.conditions.hotlist_score = hotlist_score;
-        pairToUpdate.score_value = hotlist_score * 10; // Normalize to ~0-100 for UI
+        pairToUpdate.score_value = hotlist_score * 10;
 
         if (isOnHotlist && !old_hotlist_status) {
             this.log('SCANNER', `[HOTLIST ADD] ${symbol} now meets criteria with score ${hotlist_score.toFixed(1)}. Watching on micro TFs.`);
@@ -628,8 +627,7 @@ class RealtimeAnalyzer {
         const volumes1m = klines1m.map(k => k.volume);
         
         let score_1m = 0;
-        let is_ignition_signal = false;
-
+        
         // Condition 1: Close > EMA9
         const lastEma9 = EMA.calculate({ period: 9, values: closes1m }).pop();
         if (klines1m[klines1m.length - 1].close > lastEma9) {
@@ -637,45 +635,43 @@ class RealtimeAnalyzer {
         }
 
         // Condition 2: RSI Crossover
-        const rsi_1m = RSI.calculate({period: 14, values: closes1m});
-        if(rsi_1m.length > 1 && rsi_1m[rsi_1m.length-1] > 50 && rsi_1m[rsi_1m.length-2] <= 50) {
+        const rsi_1m_values = RSI.calculate({period: 14, values: closes1m});
+        const last_rsi_1m = rsi_1m_values[rsi_1m_values.length - 1];
+        const prev_rsi_1m = rsi_1m_values[rsi_1m_values.length - 2];
+        if(last_rsi_1m > 50 && prev_rsi_1m <= 50) {
             score_1m += 1;
         }
 
         // Condition 3: MACD Crossover
         const macd_1m_input = { values: closes1m, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, simpleMAOscillator: false, simpleMASignal: false };
-        const macd_1m = MACD.calculate(macd_1m_input);
-        if(macd_1m.length > 1) {
-            const curr = macd_1m[macd_1m.length - 1];
-            const prev = macd_1m[macd_1m.length - 2];
-            if(curr.MACD > curr.signal && prev.MACD <= prev.signal) {
-                score_1m += 1;
-            }
+        const macd_1m_values = MACD.calculate(macd_1m_input);
+        const last_macd_1m = macd_1m_values[macd_1m_values.length - 1];
+        const prev_macd_1m = macd_1m_values[macd_1m_values.length - 2];
+        if(last_macd_1m && prev_macd_1m && last_macd_1m.MACD > last_macd_1m.signal && prev_macd_1m.MACD <= prev_macd_1m.signal) {
+            score_1m += 1;
         }
 
         // Condition 4: Volume Spike
         const avgVolume = volumes1m.slice(-21, -1).reduce((sum, v) => sum + v, 0) / 20;
         const volumeRatio = volumes1m[volumes1m.length - 1] / avgVolume;
         if (volumeRatio > 1.5) {
-            score_1m += 2;
+            score_1m += 2; // Ignition boost
         }
 
         // Check for Ignition conditions
-        if (volumeRatio > 1.5 && rsi_1m.length > 0 && rsi_1m[rsi_1m.length - 1] > 55 && macd_1m.length > 0 && macd_1m[macd_1m.length - 1].MACD > 0) {
-            is_ignition_signal = true;
-        }
+        const is_ignition_signal = (volumeRatio > 1.5 && last_rsi_1m > 55 && last_macd_1m && last_macd_1m.MACD > 0);
         
+        pair.conditions.score_1m = score_1m;
+        if (score_1m <= 0) return; // No signal, exit early
+
+        const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
         const triggerCandle = klines1m[klines1m.length-1];
 
-        // --- LOGIC REFACTORED FOR CLARITY AND CORRECTNESS ---
-
-        // Case 1: MTF Validation is DISABLED. We evaluate the trade directly on the 1m signal.
+        // Case 1: MTF Validation is DISABLED. Evaluate the trade directly.
         if (tradeSettings.USE_MTF_VALIDATION === false) {
-            // The threshold must be achievable by the 1m score alone. Max 1m score is 5.
-            // A score of 4 or 5 is a very strong 1m signal.
-            const directTradeThreshold = 4;
+            const directTradeThreshold = is_ignition_signal ? 3 : 4;
             if (score_1m >= directTradeThreshold) {
-                this.log('TRADE', `[DIRECT TRIGGER 1m - ${is_ignition_signal ? 'IGNITION' : 'PRECISION'}] MTF validation is OFF. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
+                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
                 const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
                 if (tradeOpened) {
                     pair.is_on_hotlist = false;
@@ -684,14 +680,12 @@ class RealtimeAnalyzer {
                     broadcast({ type: 'SCANNER_UPDATE', payload: pair });
                 }
             }
-            return; // Stop further processing for this candle
+            return;
         }
         
-        // Case 2: MTF Validation is ENABLED. We check for a reasonably strong 1m signal to put into pending.
-        // A score of 1 is too weak and creates noise. Let's require at least 3.
+        // Case 2: MTF Validation is ENABLED. Set to pending.
         const pendingThreshold = 3;
         if (score_1m >= pendingThreshold) {
-            const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
             pair.score = 'PENDING_CONFIRMATION';
             pair.strategy_type = strategy_type;
             botState.pendingConfirmation.set(symbol, {
@@ -700,9 +694,10 @@ class RealtimeAnalyzer {
                 slPriceReference: triggerCandle.low,
                 settings: tradeSettings,
                 strategy_type: strategy_type,
+                is_ignition_signal: is_ignition_signal,
                 micro_score_1m: score_1m,
             });
-            this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Ignition: ${is_ignition_signal}`);
+            this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Strategy: ${strategy_type}`);
             broadcast({ type: 'SCANNER_UPDATE', payload: pair });
         }
     }
@@ -714,12 +709,12 @@ class RealtimeAnalyzer {
         const pair = botState.scannerCache.find(p => p.symbol === symbol);
         if (!pair) return;
 
-        const { triggerPrice, slPriceReference, settings, strategy_type, micro_score_1m } = pendingSignal;
+        const { triggerPrice, slPriceReference, settings, is_ignition_signal, micro_score_1m } = pendingSignal;
         
-        let score_5m = 0;
+        let score_5m_confirm = 0;
         const klines5m = this.klineData.get(symbol)?.get('5m');
         if (new5mCandle.close > new5mCandle.open && new5mCandle.close > triggerPrice) {
-            score_5m = 2; // "Confirms"
+            score_5m_confirm = 2; // "Confirms"
         } else if (klines5m && klines5m.length > 14) {
             const closes5m = klines5m.map(k => k.close);
             const highs5m = klines5m.map(k => k.high);
@@ -727,15 +722,17 @@ class RealtimeAnalyzer {
             const atr5m = ATR.calculate({high: highs5m, low: lows5m, close: closes5m, period: 14}).pop();
             const bodySize = Math.abs(new5mCandle.open - new5mCandle.close);
             if (new5mCandle.close < new5mCandle.open && bodySize > atr5m) {
-                score_5m = -1; // "Strong contradiction"
+                score_5m_confirm = -1; // "Strong contradiction"
             }
         }
         
-        const final_micro_score = micro_score_1m + score_5m;
-        const threshold = strategy_type === 'IGNITION' ? 6 : 8;
+        pair.conditions.score_5m_confirm = score_5m_confirm;
+        const final_micro_score = micro_score_1m + score_5m_confirm;
+        pair.conditions.final_micro_score = final_micro_score;
+        const threshold = is_ignition_signal ? 6 : 8;
 
         if (final_micro_score >= threshold) {
-            this.log('TRADE', `[MTF SUCCESS - ${strategy_type}] 5m confirmed for ${symbol}. Final score ${final_micro_score} >= ${threshold}.`);
+            this.log('TRADE', `[MTF SUCCESS - ${is_ignition_signal ? 'IGNITION' : 'PRECISION'}] 5m confirmed for ${symbol}. Final score ${final_micro_score} >= ${threshold}.`);
             const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, slPriceReference, settings);
             if (tradeOpened) {
                 pair.is_on_hotlist = false;
@@ -743,7 +740,7 @@ class RealtimeAnalyzer {
                 removeSymbolFromMicroStreams(symbol);
             }
         } else {
-            this.log('TRADE', `[MTF FAILED - ${strategy_type}] 5m did not confirm for ${symbol}. Final score ${final_micro_score} < ${threshold}.`);
+            this.log('TRADE', `[MTF FAILED - ${is_ignition_signal ? 'IGNITION' : 'PRECISION'}] 5m did not confirm for ${symbol}. Final score ${final_micro_score} < ${threshold}.`);
             pair.score = 'FAKE_BREAKOUT';
             pair.strategy_type = undefined;
         }
@@ -781,7 +778,6 @@ class RealtimeAnalyzer {
 
     async handleNewKline(symbol, interval, kline) {
         if(symbol === 'BTCUSDT' && interval === '1m' && kline.closeTime) {
-            // FIX: The function checkGlobalSafetyRules is async and must be awaited.
             await checkGlobalSafetyRules();
         }
 
@@ -1425,7 +1421,6 @@ const tradingEngine = {
     async monitorAndManagePositions() {
         if (!botState.isRunning) return;
 
-        // Check for timed-out pending confirmations
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
         for (const [symbol, pending] of botState.pendingConfirmation.entries()) {
@@ -1458,16 +1453,6 @@ const tradingEngine = {
                 changes.highest_price_since_entry = currentPrice;
             }
 
-            if (currentPrice <= pos.stop_loss) {
-                positionsToClose.push({ trade: pos, exitPrice: pos.stop_loss, reason: 'Stop Loss' });
-                continue;
-            }
-
-            if (currentPrice >= pos.take_profit) {
-                positionsToClose.push({ trade: pos, exitPrice: pos.take_profit, reason: 'Take Profit' });
-                continue;
-            }
-            
             let currentR = 0;
             if (pos.initial_stop_loss) {
                 const initialRiskPerUnit = pos.average_entry_price - pos.initial_stop_loss;
@@ -1478,22 +1463,19 @@ const tradingEngine = {
             
             const pnlPct = ((currentPrice - pos.average_entry_price) / pos.average_entry_price) * 100;
 
-            // --- STRATEGY-SPECIFIC MANAGEMENT ---
             const isIgnition = pos.strategy_type === 'IGNITION';
 
             if (isIgnition && s.USE_FLASH_TRAILING_STOP) {
-                // If flash trailing is not yet active (use is_at_breakeven as the flag) and profit is >= 0.5%
                 if (!pos.is_at_breakeven && pnlPct >= 0.5) {
                     pos.is_at_breakeven = true;
                     changes.is_at_breakeven = 1;
-                    const newStopLoss = pos.average_entry_price * 1.0005; // Lock in minuscule profit
+                    const newStopLoss = pos.average_entry_price * 1.0005;
                     if (newStopLoss > pos.stop_loss) {
                         pos.stop_loss = newStopLoss;
                         changes.stop_loss = newStopLoss;
                         log('TRADE', `[${pos.symbol}] IGNITION ⚡ FLASH SL ACTIVATED at $${newStopLoss.toFixed(4)}.`);
                     }
                 }
-                // If flash trailing is active, trail the price tightly
                 if (pos.is_at_breakeven) {
                     const newTrailingSL = pos.highest_price_since_entry * (1 - s.FLASH_TRAILING_STOP_PCT / 100);
                     if (newTrailingSL > pos.stop_loss) {
@@ -1502,9 +1484,8 @@ const tradingEngine = {
                     }
                 }
             } else {
-                 // --- STANDARD MANAGEMENT LOGIC ---
-                if (s.USE_PARTIAL_TAKE_PROFIT && !pos.partial_tp_hit && pnlPct >= s.PARTIAL_TP_TRIGGER_PCT) {
-                    await this.executePartialSell(pos, currentPrice, s); // This now updates DB
+                 if (s.USE_PARTIAL_TAKE_PROFIT && !pos.partial_tp_hit && pnlPct >= s.PARTIAL_TP_TRIGGER_PCT) {
+                    await this.executePartialSell(pos, currentPrice, s);
                 }
 
                 if (s.USE_AUTO_BREAKEVEN && !pos.is_at_breakeven && currentR >= s.BREAKEVEN_TRIGGER_R) {
@@ -1540,6 +1521,16 @@ const tradingEngine = {
                 }
             }
             
+            if (currentPrice <= pos.stop_loss) {
+                positionsToClose.push({ trade: pos, exitPrice: pos.stop_loss, reason: 'Stop Loss' });
+                continue;
+            }
+
+            if (currentPrice >= pos.take_profit) {
+                positionsToClose.push({ trade: pos, exitPrice: pos.take_profit, reason: 'Take Profit' });
+                continue;
+            }
+
             if (Object.keys(changes).length > 0) {
                 const setClauses = Object.keys(changes).map(k => `${k} = ?`).join(', ');
                 await db.run(`UPDATE trades SET ${setClauses} WHERE id = ?`, [...Object.values(changes), pos.id]);
@@ -1646,7 +1637,6 @@ const tradingEngine = {
         await setKeyValue('consecutiveLosses', botState.consecutiveLosses);
         await setKeyValue('consecutiveWins', botState.consecutiveWins);
         
-        // FIX: The function checkGlobalSafetyRules is async and must be awaited.
         await checkGlobalSafetyRules();
         botState.tradeHistory.push(trade);
         
@@ -1679,7 +1669,6 @@ const tradingEngine = {
     }
 };
 
-// FIX: This function uses await and must be declared async.
 const checkGlobalSafetyRules = async () => {
     const s = botState.settings;
     let newStatus = botState.circuitBreakerStatus;
@@ -1717,9 +1706,9 @@ const checkGlobalSafetyRules = async () => {
                 newStatus = 'WARNING_BTC_DROP';
                  statusReason = `BTC drop of ${dropPct.toFixed(2)}% exceeded WARN threshold.`;
             } else {
-                if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP') {
+                if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP' || botState.circuitBreakerStatus === 'PAUSED_LOSS_STREAK') {
                     newStatus = 'NONE';
-                    statusReason = 'BTC price stabilized.';
+                    statusReason = 'BTC price stabilized or winning trade broke loss streak.';
                 }
             }
         }
@@ -1755,7 +1744,6 @@ const fetchFearAndGreedIndex = async () => {
             const fngData = { value: parseInt(fng.value, 10), classification: fng.value_classification };
             botState.fearAndGreed = fngData;
             broadcast({ type: 'FEAR_AND_GREED_UPDATE', payload: fngData });
-            // FIX: The function checkGlobalSafetyRules is async and must be awaited.
             await checkGlobalSafetyRules();
         }
     } catch (error) {
