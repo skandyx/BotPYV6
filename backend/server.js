@@ -671,7 +671,7 @@ class RealtimeAnalyzer {
         if (tradeSettings.USE_MTF_VALIDATION === false) {
             const directTradeThreshold = is_ignition_signal ? 3 : 4;
             if (score_1m >= directTradeThreshold) {
-                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
+                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF for ${symbol}. Score ${score_1m} >= ${directTradeThreshold}. Firing trade.`);
                 const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
                 if (tradeOpened) {
                     pair.is_on_hotlist = false;
@@ -1109,7 +1109,7 @@ const tradingEngine = {
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
         if (!botState.isRunning) return false;
         if (botState.circuitBreakerStatus.startsWith('HALTED') || botState.circuitBreakerStatus.startsWith('PAUSED')) {
-            log('WARN', `Trade for ${pair.symbol} blocked: Global Circuit Breaker is active (${botState.circuitBreakerStatus}).`);
+            log('TRADE', `[FILTER] Trade for ${pair.symbol} blocked: Global Circuit Breaker is active (${botState.circuitBreakerStatus}).`);
             return false;
         }
         
@@ -1188,18 +1188,18 @@ const tradingEngine = {
         
         const cooldownInfo = botState.recentlyLostSymbols.get(pair.symbol);
         if (cooldownInfo && Date.now() < cooldownInfo.until) {
-            log('TRADE', `Skipping trade for ${pair.symbol} due to recent loss cooldown.`);
+            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol} due to recent loss cooldown.`);
             pair.score = 'COOLDOWN'; // Ensure state reflects this
             return false;
         }
 
         if (botState.activePositions.length >= tradeSettings.MAX_OPEN_POSITIONS) {
-            log('TRADE', `Skipping trade for ${pair.symbol}: Max open positions (${tradeSettings.MAX_OPEN_POSITIONS}) reached.`);
+            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Max open positions (${tradeSettings.MAX_OPEN_POSITIONS}) reached.`);
             return false;
         }
 
         if (botState.activePositions.some(p => p.symbol === pair.symbol)) {
-            log('TRADE', `Skipping trade for ${pair.symbol}: Position already open.`);
+            log('TRADE', `[FILTER] Skipping trade for ${pair.symbol}: Position already open.`);
             return false;
         }
 
@@ -1280,12 +1280,13 @@ const tradingEngine = {
         } else if (tradeSettings.USE_ATR_STOP_LOSS && pair.atr_15m) {
             stopLoss = entryPrice - (pair.atr_15m * tradeSettings.ATR_MULTIPLIER);
         } else {
-            stopLoss = slPriceReference * (1 - tradeSettings.STOP_LOSS_PCT / 100);
+            // This is for fixed percentage SL (e.g. Scalpeur profile)
+            stopLoss = entryPrice * (1 - tradeSettings.STOP_LOSS_PCT / 100);
         }
 
         const riskPerUnit = entryPrice - stopLoss;
         if (riskPerUnit <= 0) {
-            log('ERROR', `Calculated risk is zero or negative for ${pair.symbol}. SL: ${stopLoss}, Entry: ${entryPrice}. Aborting trade.`);
+            log('TRADE', `[REJECTED] Trade for ${pair.symbol} aborted due to invalid risk. Entry: $${entryPrice}, SL: $${stopLoss}`);
             return false;
         }
         
