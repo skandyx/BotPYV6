@@ -1357,8 +1357,8 @@ const tradingEngine = {
             const atr1m = fastAtr(highs1m, lows1m, closes1m, 7).pop();
             if (highs1m.length > 0) {
                 const lastRange = highs1m[highs1m.length - 1] - lows1m[lows1m.length - 1];
-                const rangeOk = !atr1m || lastRange >= atr1m * 1.2;
-                if (!rangeOk && !isIgnition) {
+                const rangeOk = !atr1m || lastRange >= atr1m * 0.9;
+                if (!rangeOk && !isIgnition && !superBull) {
                     log('TRADE', `[RANGE] ${pair.symbol} 1 m range too tight – skipped.`);
                     return false;
                 }
@@ -1368,11 +1368,10 @@ const tradingEngine = {
             const obv1h_klines = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1h') || [];
             const obv1h_data_for_calc = obv1h_klines.map(k => ({ close: k.close, volume: k.volume, open: k.open }));
             const obv1h = calculateOBV(obv1h_data_for_calc);
-            let obvOk = true;
             if (obv1h.length > 20) {
                 const obvEma20 = EMA.calculate({ period: 20, values: obv1h }).pop();
-                obvOk = !obvEma20 || (obv1h.length && obv1h[obv1h.length - 1] >= obvEma20);
-                if (!obvOk && !isIgnition) {
+                const obvOk = !obvEma20 || (obv1h.length && obv1h[obv1h.length - 1] >= obvEma20);
+                if (!obvOk && !isIgnition && !superBull) {
                     log('TRADE', `[OBV] ${pair.symbol} OBV 1 h below EMA – skipped.`);
                     return false;
                 }
@@ -1380,12 +1379,11 @@ const tradingEngine = {
 
             // 3. Spread kill-switch
             const ticker = await binanceApiClient.getOrderBookTicker(pair.symbol);
-            let spreadOk = true;
             if (ticker && ticker.bidPrice && ticker.askPrice) {
                 const spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
-                spreadOk = spread <= 0.8;
-                if (!spreadOk && !isIgnition && !superBull) {
-                  log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > 0.8 % – skipped.`);
+                const spreadMax = isIgnition || superBull ? 1.2 : 0.8;
+                if (spread > spreadMax) {
+                  log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > ${spreadMax} % – skipped.`);
                   return false;
                 }
             }
@@ -1407,7 +1405,7 @@ const tradingEngine = {
             try {
                 const perpTicker = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${pair.symbol}`).then(res => res.json());
                 const fundOk = !(perpTicker && perpTicker.lastFundingRate && parseFloat(perpTicker.lastFundingRate) > 0.0005);
-                if (!fundOk && !isIgnition) {
+                if (!fundOk && !isIgnition && !superBull) {
                     log('TRADE', `[FUNDING] ${pair.symbol} funding > 0.05% – skipped.`);
                     return false;
                 }
@@ -1516,13 +1514,10 @@ const tradingEngine = {
 
             // --- TAIL-RISK SIZING ---
             let tailMultiplier = 1.0;
-            if (isIgnition) {
-                tailMultiplier = 0.75; // smaller size for high-risk ignition
-            } else if (superBull) {
-                tailMultiplier = 1.2; // bigger size for super high conviction
-            }
-            if (!spreadOk) { // spreadOk was calculated in filters
-                tailMultiplier *= 0.6; // reduce size further if spread is wide
+            if (superBull) {
+                tailMultiplier = 1.2; // Super-bull takes precedence
+            } else if (isIgnition) {
+                tailMultiplier = 0.75; // Standard ignition
             }
             if (tailMultiplier !== 1.0) {
                 log('TRADE', `[TAIL-RISK SIZING] Applying multiplier ${tailMultiplier.toFixed(2)}x to position size for ${pair.symbol}.`);
