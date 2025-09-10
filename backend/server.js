@@ -1412,9 +1412,10 @@ const tradingEngine = {
             } catch (e) { /* ignore */ }
 
 
-            // --- Liquidity Filter (Bypassed for Ignition) ---
-            if (!isIgnition && tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
+            // --- Liquidity Filter (Relaxed for Ignition) ---
+            if (tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
                 try {
+                    const requiredLiquidity = isIgnition ? 120000 : tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD;
                     const depth = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair.symbol}&limit=100`).then(res => res.json());
                     const price = pair.price;
                     const range = 0.005; // +/- 0.5%
@@ -1424,8 +1425,8 @@ const tradingEngine = {
                     const totalAsksValue = asksInScope.reduce((sum, a) => sum + (parseFloat(a[0]) * parseFloat(a[1])), 0);
                     const totalLiquidity = totalBidsValue + totalAsksValue;
     
-                    if (totalLiquidity < tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD) {
-                        log('TRADE', `[LIQUIDITY FILTER] Rejected ${pair.symbol}. Liquidity ($${totalLiquidity.toFixed(0)}) is below threshold ($${tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD}).`);
+                    if (totalLiquidity < requiredLiquidity) {
+                        log('TRADE', `[LIQUIDITY FILTER] Rejected ${pair.symbol}. Liquidity ($${totalLiquidity.toFixed(0)}) is below threshold ($${requiredLiquidity}).`);
                         return false;
                     }
                 } catch (e) {
