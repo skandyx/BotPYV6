@@ -1,3 +1,4 @@
+
 # -----------------------------------------------------------------------------
 # BOTPY BACKEND ENVIRONMENT CONFIGURATION
 #
@@ -25,7 +26,7 @@ MIN_VOLUME_USD=40000000
 SCANNER_DISCOVERY_INTERVAL_SECONDS=3600
 EXCLUDED_PAIRS="USDCUSDT,FDUSDUSDT,TUSDUSDT,BUSDUSDT"
 # Note: Les booléens ci-dessous sont 'true' par défaut sauf si vous les mettez explicitement à 'false'.
-# Ex: USE_DYNAMIC_PROFILE_SELECTOR=false
+# Ex: USE_VOLUME_CONFIRMATION=false
 USE_VOLUME_CONFIRMATION=true
 USE_MARKET_REGIME_FILTER=true
 REQUIRE_STRONG_BUY=false
@@ -91,18 +92,9 @@ PARABOLIC_FILTER_PERIOD_MINUTES=5
 PARABOLIC_FILTER_THRESHOLD_PCT=2.5
 
 # --- ADAPTIVE BEHAVIOR ---
-# Activer le sélecteur de profil dynamique. (true/false) - FORTEMENT RECOMMANDÉ
-USE_DYNAMIC_PROFILE_SELECTOR=true
-# Le seuil ADX (15m) en dessous duquel le marché est considéré en "range".
-ADX_THRESHOLD_RANGE=20
-# Le seuil ATR (en % du prix) au-dessus duquel le marché est considéré volatil.
-ATR_PCT_THRESHOLD_VOLATILE=5.0
-# Logique d'entrée agressive. (Doit rester false ici, est géré par les profils).
-USE_AGGRESSIVE_ENTRY_LOGIC=false
-
 # Stop suiveur adaptatif qui se resserre avec les profits. (true/false)
 USE_ADAPTIVE_TRAILING_STOP=true
-# Le multiple de risque (R) à atteindre pour resserrer le stop.
+# Le multiple de risque (R) à atteindre pour resserre le stop.
 TRAILING_STOP_TIGHTEN_THRESHOLD_R=1.0
 # La valeur de réduction du multiplicateur ATR après resserrement.
 TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION=0.3
@@ -127,6 +119,10 @@ USE_WHALE_MANIPULATION_FILTER=true
 # Seuil de volume (en % du volume horaire moyen) pour détecter une manipulation.
 WHALE_SPIKE_THRESHOLD_PCT=5.0
 
+# --- ADVANCED EXIT TACTICS ---
+USE_REVERSAL_EXIT_STRATEGY=false
+MAX_TRADE_DURATION_MINUTES=0
+
 # --- GLOBAL SAFETY ---
 # Pourcentage de chute de BTC sur 5 minutes pour déclencher une alerte.
 CIRCUIT_BREAKER_WARN_THRESHOLD_PCT=1.5
@@ -147,7 +143,11 @@ IGNITION_VOLUME_MULTIPLIER=10
 # Activer le stop loss suiveur ultra-réactif pour les trades Ignition. (true/false)
 USE_FLASH_TRAILING_STOP=false
 # Pourcentage du stop suiveur éclair.
-FLASH_TRAILING_STOP_PCT=1.5
+FLASH_SL_DELTA_PCT=1.5
+# Pourcentage de PnL pour déclencher le passage au break-even
+FLASH_SL_BREAKEVEN_TRIGGER_PCT=0.2
+# Marge de profit à ajouter au break-even pour couvrir les frais
+FLASH_SL_BREAKEVEN_OFFSET_PCT=0.05
 
 # --- API CREDENTIALS ---
 BINANCE_API_KEY=votre_cle_api_binance

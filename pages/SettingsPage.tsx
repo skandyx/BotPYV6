@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../services/mockApi';
 import { BotSettings } from '../types';
@@ -7,88 +8,11 @@ import ToggleSwitch from '../components/common/ToggleSwitch';
 import Tooltip from '../components/common/Tooltip';
 import Modal from '../components/common/Modal';
 
-// --- TYPES & PROFILES ---
-type ProfileName = 'Le Sniper' | 'Le Scalpeur' | 'Le Chasseur de Volatilité';
-type ActiveProfile = ProfileName | 'PERSONNALISE';
-
-const profileTooltips: Record<ProfileName, string> = {
-    'Le Sniper': "PRUDENT : Vise la qualité maximale. Filtres très stricts et gestion 'Profit Runner' pour laisser courir les gagnants au maximum.",
-    'Le Scalpeur': "ÉQUILIBRÉ : Optimisé pour des gains rapides et constants. Ratio Risque/Récompense faible, idéal pour les marchés en range.",
-    'Le Chasseur de Volatilité': "AGRESSIF : Conçu pour les marchés explosifs. Utilise un mode d'entrée rapide et une gestion du risque adaptée à une forte volatilité."
-};
-
-const settingProfiles: Record<ProfileName, Partial<BotSettings>> = {
-    'Le Sniper': { // PRUDENT
-        POSITION_SIZE_PCT: 2.0,
-        MAX_OPEN_POSITIONS: 3,
-        REQUIRE_STRONG_BUY: true,
-        USE_RSI_SAFETY_FILTER: true,
-        RSI_OVERBOUGHT_THRESHOLD: 65,
-        USE_PARABOLIC_FILTER: true,
-        PARABOLIC_FILTER_PERIOD_MINUTES: 5,
-        PARABOLIC_FILTER_THRESHOLD_PCT: 2.5,
-        USE_ATR_STOP_LOSS: true,
-        ATR_MULTIPLIER: 1.5,
-        USE_PARTIAL_TAKE_PROFIT: true,
-        PARTIAL_TP_TRIGGER_PCT: 1.0, // 1% PnL trigger
-        PARTIAL_TP_SELL_QTY_PCT: 50,
-        USE_AUTO_BREAKEVEN: true,
-        BREAKEVEN_TRIGGER_R: 1.0,
-        ADJUST_BREAKEVEN_FOR_FEES: true,
-        TRANSACTION_FEE_PCT: 0.1,
-        USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.5,
-        TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
-        RISK_REWARD_RATIO: 5.0,
-        USE_AGGRESSIVE_ENTRY_LOGIC: false,
-    },
-    'Le Scalpeur': { // EQUILIBRE
-        POSITION_SIZE_PCT: 3.0,
-        MAX_OPEN_POSITIONS: 5,
-        REQUIRE_STRONG_BUY: false,
-        USE_RSI_SAFETY_FILTER: true,
-        RSI_OVERBOUGHT_THRESHOLD: 70,
-        USE_PARABOLIC_FILTER: true,
-        PARABOLIC_FILTER_PERIOD_MINUTES: 5,
-        PARABOLIC_FILTER_THRESHOLD_PCT: 3.5,
-        USE_ATR_STOP_LOSS: false,
-        STOP_LOSS_PCT: 0.3,
-        RISK_REWARD_RATIO: 2.0, // 0.6% TP / 0.3% SL
-        USE_PARTIAL_TAKE_PROFIT: false,
-        USE_AUTO_BREAKEVEN: false,
-        ADJUST_BREAKEVEN_FOR_FEES: false,
-        TRANSACTION_FEE_PCT: 0.1,
-        USE_ADAPTIVE_TRAILING_STOP: false,
-        USE_AGGRESSIVE_ENTRY_LOGIC: false,
-    },
-    'Le Chasseur de Volatilité': { // AGRESSIF
-        POSITION_SIZE_PCT: 4.0,
-        MAX_OPEN_POSITIONS: 8,
-        REQUIRE_STRONG_BUY: false,
-        USE_RSI_SAFETY_FILTER: false,
-        RSI_OVERBOUGHT_THRESHOLD: 80,
-        USE_PARABOLIC_FILTER: false,
-        USE_ATR_STOP_LOSS: true,
-        ATR_MULTIPLIER: 2.0,
-        RISK_REWARD_RATIO: 3.0,
-        USE_PARTIAL_TAKE_PROFIT: false,
-        USE_AUTO_BREAKEVEN: true,
-        BREAKEVEN_TRIGGER_R: 2.0,
-        ADJUST_BREAKEVEN_FOR_FEES: true,
-        TRANSACTION_FEE_PCT: 0.1,
-        USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.0,
-        TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
-        USE_AGGRESSIVE_ENTRY_LOGIC: true, // Specific to this profile
-    }
-};
-
-
 // --- HELPERS ---
 const tooltips: Record<string, string> = {
     INITIAL_VIRTUAL_BALANCE: "Le capital de départ pour votre compte de trading virtuel. Ce montant est appliqué lorsque vous effacez toutes les données de trading.",
     MAX_OPEN_POSITIONS: "Le nombre maximum de trades que le bot peut avoir ouverts en même temps. Aide à contrôler l'exposition globale au risque.",
-    POSITION_SIZE_PCT: "Le pourcentage de votre solde total à utiliser pour chaque nouveau trade. (ex: 2% sur un solde de 10 000 $ se traduira par des positions de 200 $).",
+    POSITION_SIZE_PCT: "Le pourcentage de votre solde total à utiliser pour chaque nouveau trade. (ex: 2% sur un solde de 10 0٠٠ $ se traduira par des positions de 200 $).",
     RISK_REWARD_RATIO: "Le multiplicateur de votre risque pour définir l'objectif de profit. Un ratio de 3.0 signifie que le Take Profit sera fixé à 3 fois la distance du Stop Loss.",
     STOP_LOSS_PCT: "Le pourcentage de perte auquel un trade sera automatiquement clôturé pour éviter de nouvelles pertes. C'est le risque maximum par trade.",
     USE_TRAILING_STOP_LOSS: "Active un stop loss dynamique qui monte pour sécuriser les profits à mesure que le prix augmente, mais ne descend jamais.",
@@ -108,7 +32,7 @@ const tooltips: Record<string, string> = {
     USE_AUTO_BREAKEVEN: "Déplacer automatiquement le Stop Loss au prix d'entrée une fois qu'un trade est en profit, éliminant le risque de perte.",
     BREAKEVEN_TRIGGER_R: "Le multiple de risque (R) à atteindre pour déclencher le passage au seuil de rentabilité (ex: 1.0 signifie que lorsque le profit atteint 1x le risque initial, le SL est déplacé au prix d'entrée).",
     ADJUST_BREAKEVEN_FOR_FEES: "Si activé, le 'Break-Even' sera légèrement au-dessus du prix d'entrée pour couvrir les frais de transaction de l'achat et de la vente, assurant une sortie à 0$ P&L net.",
-    TRANSACTION_FEE_PCT: "Le pourcentage de frais de transaction par ordre sur votre exchange (ex: 0.1 pour 0.1%). Utilisé pour calculer le point de Break-Even réel.",
+    TRANSACTION_FEE_PCT: "Le pourcentage de frais de transaction par ordre sur votre exchange (ex: 0.1 pour 0.1%). Utilisé pour calculer le point de Break-Even réel et le P&L net.",
     USE_RSI_SAFETY_FILTER: "Empêcher l'ouverture de nouveaux trades si le RSI est dans la zone de 'surachat', évitant d'acheter à un potentiel sommet local.",
     RSI_OVERBOUGHT_THRESHOLD: "Le niveau RSI au-dessus duquel un signal de trade sera ignoré (ex: 70).",
     USE_PARTIAL_TAKE_PROFIT: "Vendre une partie de la position à un objectif de profit préliminaire et laisser le reste courir avec le trailing stop loss.",
@@ -119,10 +43,6 @@ const tooltips: Record<string, string> = {
     USE_PARABOLIC_FILTER: "Active un filtre de sécurité pour éviter d'ouvrir des trades sur des mouvements de prix soudains et verticaux (paraboliques), qui sont souvent des pièges de liquidité.",
     PARABOLIC_FILTER_PERIOD_MINUTES: "La période (en minutes) sur laquelle vérifier une hausse de prix parabolique avant d'entrer dans un trade.",
     PARABOLIC_FILTER_THRESHOLD_PCT: "Le pourcentage maximum d'augmentation de prix autorisé sur la période de vérification. Si le prix a augmenté plus que ce seuil, le trade est ignoré pour éviter d'entrer sur un pic insoutenable.",
-    USE_DYNAMIC_PROFILE_SELECTOR: "Si activé, le bot choisira automatiquement le meilleur profil (Sniper, Scalpeur, Chasseur) pour chaque trade en fonction des conditions de marché (tendance, volatilité) au moment de l'entrée.",
-    ADX_THRESHOLD_RANGE: "Le seuil ADX (15m) en dessous duquel un marché est considéré comme étant en 'range' (faible tendance), déclenchant le profil 'Scalpeur'.",
-    ATR_PCT_THRESHOLD_VOLATILE: "Le seuil de l'ATR (en % du prix) au-dessus duquel un marché est considéré comme hyper-volatil, déclenchant le profil 'Chasseur de Volatilité'.",
-    USE_AGGRESSIVE_ENTRY_LOGIC: "Permet une entrée plus rapide basée uniquement sur le momentum 1m (EMA9 + Volume), sans attendre la confirmation structurelle 15m. Utilisé par le profil 'Chasseur de Volatilité'.",
     USE_ADAPTIVE_TRAILING_STOP: "Rend le stop suiveur plus intelligent en le resserrant à mesure que le trade devient plus profitable, pour sécuriser les gains de manière plus agressive.",
     TRAILING_STOP_TIGHTEN_THRESHOLD_R: "Le multiple de risque (R) à atteindre pour que le stop suiveur se resserre. Ex: 1.5 signifie que lorsque le trade atteint +1.5R de profit, le stop se resserre.",
     TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: "La valeur de réduction du multiplicateur ATR une fois le seuil de resserrement atteint. Ex: 0.5 réduira un multiplicateur de 1.5 à 1.0.",
@@ -150,7 +70,11 @@ const tooltips: Record<string, string> = {
     IGNITION_PRICE_THRESHOLD_PCT: "Le pourcentage minimum de hausse de prix sur une seule bougie de 1 minute pour déclencher un signal d'Ignition.",
     IGNITION_VOLUME_MULTIPLIER: "Le multiplicateur de volume requis. Le volume de la bougie de 1 minute doit être ce nombre de fois supérieur à la moyenne recente.",
     USE_FLASH_TRAILING_STOP: "Active un stop loss suiveur en pourcentage, très serré et réactif, spécifiquement pour les trades Ignition. Recommandé.",
-    FLASH_TRAILING_STOP_PCT: "Le pourcentage en dessous du plus haut prix atteint auquel le stop suiveur sera placé. Ex: 1.5 pour -1.5%.",
+    FLASH_SL_DELTA_PCT: "Le pourcentage en dessous du plus haut prix atteint auquel le stop suiveur éclair sera placé. Ex: 1.5 pour -1.5%.",
+    FLASH_SL_BREAKEVEN_TRIGGER_PCT: "Le PnL % net requis pour déplacer le stop loss au point d'entrée pour les trades Ignition.",
+    FLASH_SL_BREAKEVEN_OFFSET_PCT: "Une petite marge de profit (en %) à ajouter au point d'entrée lors du passage au break-even, pour couvrir les frais.",
+    USE_REVERSAL_EXIT_STRATEGY: "Si activé, le trade sera clôturé immédiatement si une bougie de 1 minute clôture à la baisse (pour un long). Utile pour les stratégies de scalping.",
+    MAX_TRADE_DURATION_MINUTES: "Clôture automatique d'un trade après une durée spécifiée (en minutes). Mettre à 0 pour désactiver. Utile pour éviter les trades stagnants.",
 };
 
 const inputClass = "mt-1 block w-full rounded-md border-[#3e4451] bg-[#0c0e12] shadow-sm focus:border-[#f0b90b] focus:ring-[#f0b90b] sm:text-sm text-white";
@@ -158,7 +82,6 @@ const inputClass = "mt-1 block w-full rounded-md border-[#3e4451] bg-[#0c0e12] s
 const SettingsPage: React.FC = () => {
     const { settings: contextSettings, setSettings: setContextSettings, incrementSettingsActivity, refreshData } = useAppContext();
     const [settings, setSettings] = useState<BotSettings | null>(contextSettings);
-    const [activeProfile, setActiveProfile] = useState<ActiveProfile>('PERSONNALISE');
     const [isSaving, setIsSaving] = useState(false);
     const [isTestingBinance, setIsTestingBinance] = useState(false);
     const [saveMessage, setSaveMessage] = useState<{text: string, type: 'success' | 'error'} | null>(null);
@@ -171,48 +94,6 @@ const SettingsPage: React.FC = () => {
             setSettings(contextSettings);
         }
     }, [contextSettings]);
-
-    // Effect to detect the current profile based on settings
-    useEffect(() => {
-        if (!settings || settings.USE_DYNAMIC_PROFILE_SELECTOR) {
-            setActiveProfile('PERSONNALISE');
-            return;
-        }
-
-        const checkProfile = (profile: Partial<BotSettings>): boolean => {
-            return Object.keys(profile).every(key => {
-                const settingKey = key as keyof BotSettings;
-                if (!settings.hasOwnProperty(settingKey)) return false; // Ensure the key exists on the main settings object
-                // Handle potential floating point inaccuracies for numeric comparisons
-                if (typeof settings[settingKey] === 'number' && typeof profile[settingKey] === 'number') {
-                     return Math.abs((settings[settingKey] as number) - (profile[settingKey] as number)) < 0.001;
-                }
-                return settings[settingKey] === profile[settingKey];
-            });
-        };
-
-        let currentProfile: ActiveProfile = 'PERSONNALISE';
-        if (checkProfile(settingProfiles['Le Sniper'])) {
-            currentProfile = 'Le Sniper';
-        } else if (checkProfile(settingProfiles['Le Scalpeur'])) {
-            currentProfile = 'Le Scalpeur';
-        } else if (checkProfile(settingProfiles['Le Chasseur de Volatilité'])) {
-            currentProfile = 'Le Chasseur de Volatilité';
-        }
-        
-        if (currentProfile !== activeProfile) {
-            setActiveProfile(currentProfile);
-        }
-
-    }, [settings, activeProfile]);
-
-
-    const handleProfileSelect = (profileName: ProfileName) => {
-        if (!settings || settings.USE_DYNAMIC_PROFILE_SELECTOR) return;
-        const profileSettings = settingProfiles[profileName];
-        setSettings({ ...settings, ...profileSettings });
-        setActiveProfile(profileName);
-    };
 
     const showMessage = (text: string, type: 'success' | 'error' = 'success', duration: number = 4000) => {
         setSaveMessage({ text, type });
@@ -374,51 +255,6 @@ const SettingsPage: React.FC = () => {
                 </div>
             </div>
 
-             {/* Profile Selector */}
-            <div className="bg-[#14181f]/50 border border-[#2b2f38] rounded-lg p-6 shadow-lg">
-                <h3 className="text-lg font-semibold text-white mb-1">Profil de Comportement Adaptatif</h3>
-                <p className="text-sm text-gray-400 mb-4">Activez le sélecteur dynamique pour laisser le bot choisir la meilleure tactique de sortie, ou désactivez-le pour sélectionner manuellement un profil de gestion.</p>
-                <div className="flex items-center space-x-4 mb-4 bg-[#0c0e12]/30 p-3 rounded-lg">
-                    <ToggleSwitch
-                        checked={settings.USE_DYNAMIC_PROFILE_SELECTOR}
-                        onChange={(checked) => handleChange('USE_DYNAMIC_PROFILE_SELECTOR', checked)}
-                        leftLabel="AUTO"
-                        rightLabel="MANUEL"
-                    />
-                    <label className="flex items-center text-sm font-medium text-gray-300">
-                        Sélecteur de Profil Dynamique
-                        <Tooltip text={tooltips.USE_DYNAMIC_PROFILE_SELECTOR} />
-                    </label>
-                </div>
-                <div className={`transition-opacity ${settings.USE_DYNAMIC_PROFILE_SELECTOR ? 'opacity-50' : ''}`}>
-                    <div className="isolate inline-flex rounded-md shadow-sm">
-                        {(['Le Sniper', 'Le Scalpeur', 'Le Chasseur de Volatilité'] as ProfileName[]).map((profile, idx) => (
-                            <button
-                                key={profile}
-                                type="button"
-                                onClick={() => handleProfileSelect(profile)}
-                                disabled={settings.USE_DYNAMIC_PROFILE_SELECTOR}
-                                className={`relative inline-flex items-center px-4 py-2 text-sm font-semibold ring-1 ring-inset ring-[#3e4451] focus:z-10 transition-colors group
-                                    ${activeProfile === profile && !settings.USE_DYNAMIC_PROFILE_SELECTOR ? 'bg-[#f0b90b] text-black' : 'bg-[#14181f] text-gray-300 hover:bg-[#2b2f38]'}
-                                    ${idx === 0 ? 'rounded-l-md' : ''}
-                                    ${idx === 2 ? 'rounded-r-md' : '-ml-px'}
-                                    ${settings.USE_DYNAMIC_PROFILE_SELECTOR ? 'cursor-not-allowed' : ''}
-                                `}
-                            >
-                                {profile}
-                                <div className="absolute bottom-full mb-2 w-64 rounded-lg bg-gray-900 border border-gray-700 p-3 text-xs text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none z-10 shadow-lg"
-                                    style={{ transform: 'translateX(-50%)', left: '50%' }}>
-                                    {profileTooltips[profile]}
-                                    <div className="absolute left-1/2 top-full h-2 w-2 -translate-x-1/2 bg-gray-900 border-b border-r border-gray-700" style={{ transform: 'translateX(-50%) rotate(45deg)' }}></div>
-                                </div>
-                            </button>
-                        ))}
-                    </div>
-                    {activeProfile === 'PERSONNALISE' && !settings.USE_DYNAMIC_PROFILE_SELECTOR && <span className="ml-4 text-sm font-semibold text-sky-400">-- Profil Personnalisé Actif --</span>}
-                    {settings.USE_DYNAMIC_PROFILE_SELECTOR && <span className="ml-4 text-sm font-semibold text-green-400">-- Le bot choisit la meilleure tactique --</span>}
-                </div>
-            </div>
-
             {/* Main Settings Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-6">
 
@@ -432,13 +268,13 @@ const SettingsPage: React.FC = () => {
                              <InputField id="POSITION_SIZE_PCT" label="Taille de Position (%)" step="0.1" children={<span className="text-gray-400 text-sm">%</span>}/>
                              <InputField id="STOP_LOSS_PCT" label="Stop Loss (%)" step="0.1" children={<span className="text-gray-400 text-sm">%</span>}/>
                              <InputField id="RISK_REWARD_RATIO" label="Ratio Risque/Récompense" step="0.1" children={<span className="text-gray-400 text-sm">:1</span>}/>
-                             <InputField id="INITIAL_VIRTUAL_BALANCE" label="Solde Virtuel Initial" step="100" children={<span className="text-gray-400 text-sm">$</span>}/>
+                             <InputField id="TRANSACTION_FEE_PCT" label="Frais de Transaction (%)" step="0.01" children={<span className="text-gray-400 text-sm">%</span>}/>
                              <InputField id="SLIPPAGE_PCT" label="Slippage Simulé (%)" step="0.01" children={<span className="text-gray-400 text-sm">%</span>}/>
                         </div>
                     </div>
                     {/* Advanced Strategy */}
                     <div className="bg-[#14181f]/50 border border-[#2b2f38] rounded-lg p-6 shadow-lg">
-                        <h3 className="text-lg font-semibold text-white mb-4">Stratégie Avancée</h3>
+                        <h3 className="text-lg font-semibold text-white mb-4">Stratégie Avancée & Tactiques de Sortie</h3>
                         <div className="space-y-4">
                             <ToggleField id="USE_MARKET_REGIME_FILTER" label="Filtre de Tendance Maître (4h)" />
                             <ToggleField id="USE_VOLUME_CONFIRMATION" label="Confirmation par Volume (1m)" />
@@ -448,6 +284,9 @@ const SettingsPage: React.FC = () => {
                             </div>
                             <ToggleField id="REQUIRE_STRONG_BUY" label="Exiger un 'STRONG BUY' pour l'entrée" />
                             <InputField id="LOSS_COOLDOWN_HOURS" label="Cooldown après Perte (Heures)" children={<span className="text-gray-400 text-sm">h</span>}/>
+                             <hr className="border-gray-700"/>
+                            <ToggleField id="USE_REVERSAL_EXIT_STRATEGY" label="Sortie sur Inversion (1m)" />
+                            <InputField id="MAX_TRADE_DURATION_MINUTES" label="Durée Max du Trade (minutes, 0=désactivé)" />
                         </div>
                     </div>
                     
@@ -460,15 +299,6 @@ const SettingsPage: React.FC = () => {
                                  <InputField id="PARABOLIC_FILTER_PERIOD_MINUTES" label="Période de Vérif. (min)" />
                                  <InputField id="PARABOLIC_FILTER_THRESHOLD_PCT" label="Seuil de Hausse (%)" step="0.1" />
                             </div>
-                        </div>
-                    </div>
-
-                    {/* Dynamic Profile Thresholds */}
-                    <div className="bg-[#14181f]/50 border border-[#2b2f38] rounded-lg p-6 shadow-lg">
-                        <h3 className="text-lg font-semibold text-white mb-4">Seuils du Profil Dynamique</h3>
-                        <div className={`space-y-4 transition-opacity ${settings.USE_DYNAMIC_PROFILE_SELECTOR ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-                             <InputField id="ADX_THRESHOLD_RANGE" label="Seuil ADX (Marché en Range)" />
-                             <InputField id="ATR_PCT_THRESHOLD_VOLATILE" label="Seuil ATR % (Marché Volatil)" step="0.1" />
                         </div>
                     </div>
 
@@ -560,9 +390,6 @@ const SettingsPage: React.FC = () => {
                              <div className={`pl-4 space-y-4 mt-2 transition-opacity ${settings.USE_AUTO_BREAKEVEN ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
                                 <InputField id="BREAKEVEN_TRIGGER_R" label="Déclencheur Break-Even (R)" step="0.1" />
                                 <ToggleField id="ADJUST_BREAKEVEN_FOR_FEES" label="Ajuster pour les Frais" />
-                                <div className={`transition-opacity ${settings.ADJUST_BREAKEVEN_FOR_FEES ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-                                    <InputField id="TRANSACTION_FEE_PCT" label="Frais de Transaction (%)" step="0.01" />
-                                </div>
                             </div>
                             <hr className="border-gray-700"/>
                             <ToggleField id="USE_PARTIAL_TAKE_PROFIT" label="Prise de Profit Partielle" />
@@ -615,8 +442,10 @@ const SettingsPage: React.FC = () => {
 
                         <ToggleField id="USE_FLASH_TRAILING_STOP" label="Activer le Stop Loss Suiveur Éclair ⚡" disabled={!settings.USE_IGNITION_STRATEGY} />
                         
-                        <div className={`pl-4 transition-opacity ${settings.USE_FLASH_TRAILING_STOP ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-                             <InputField id="FLASH_TRAILING_STOP_PCT" label="Pourcentage du Suiveur Éclair" step="0.1" children={<span className="text-gray-400 text-sm">%</span>}/>
+                        <div className={`pl-4 grid grid-cols-1 md:grid-cols-3 gap-4 transition-opacity ${settings.USE_FLASH_TRAILING_STOP ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
+                             <InputField id="FLASH_SL_DELTA_PCT" label="Flash SL Delta (%)" step="0.1" />
+                             <InputField id="FLASH_SL_BREAKEVEN_TRIGGER_PCT" label="Déclencheur BE (%)" step="0.1" />
+                             <InputField id="FLASH_SL_BREAKEVEN_OFFSET_PCT" label="Marge BE (%)" step="0.01" />
                         </div>
                     </div>
                 </div>
@@ -649,6 +478,10 @@ const SettingsPage: React.FC = () => {
                     <div className="bg-[#14181f]/50 border border-[#2b2f38] rounded-lg p-6 shadow-lg">
                          <h3 className="text-lg font-semibold text-white mb-4">Sécurité & Disjoncteur Global</h3>
                          <div className="space-y-4">
+                            <div>
+                                <label className="text-sm font-medium text-gray-300">Solde Virtuel Initial</label>
+                                <InputField id="INITIAL_VIRTUAL_BALANCE" label="" step="100" children={<span className="text-gray-400 text-sm">$</span>}/>
+                            </div>
                              <div className="grid grid-cols-2 gap-4">
                                 <InputField id="CIRCUIT_BREAKER_WARN_THRESHOLD_PCT" label="Alerte Chute BTC (%)" step="0.1" />
                                 <InputField id="CIRCUIT_BREAKER_HALT_THRESHOLD_PCT" label="Arrêt Chute BTC (%)" step="0.1" />

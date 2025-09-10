@@ -1,3 +1,4 @@
+
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
@@ -491,10 +492,6 @@ const loadData = async () => {
             USE_DYNAMIC_POSITION_SIZING: isTrue('USE_DYNAMIC_POSITION_SIZING'),
             STRONG_BUY_POSITION_SIZE_PCT: parseFloat(process.env.STRONG_BUY_POSITION_SIZE_PCT) || 3.0,
             REQUIRE_STRONG_BUY: isTrue('REQUIRE_STRONG_BUY'),
-            USE_DYNAMIC_PROFILE_SELECTOR: isNotFalse('USE_DYNAMIC_PROFILE_SELECTOR'),
-            ADX_THRESHOLD_RANGE: parseInt(process.env.ADX_THRESHOLD_RANGE, 10) || 20,
-            ATR_PCT_THRESHOLD_VOLATILE: parseFloat(process.env.ATR_PCT_THRESHOLD_VOLATILE) || 5.0,
-            USE_AGGRESSIVE_ENTRY_LOGIC: isTrue('USE_AGGRESSIVE_ENTRY_LOGIC'),
             USE_ADAPTIVE_TRAILING_STOP: isNotFalse('USE_ADAPTIVE_TRAILING_STOP'),
             TRAILING_STOP_TIGHTEN_THRESHOLD_R: parseFloat(process.env.TRAILING_STOP_TIGHTEN_THRESHOLD_R) || 1.0,
             TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: parseFloat(process.env.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION) || 0.3,
@@ -522,7 +519,11 @@ const loadData = async () => {
             IGNITION_PRICE_THRESHOLD_PCT: parseFloat(process.env.IGNITION_PRICE_THRESHOLD_PCT) || 5.0,
             IGNITION_VOLUME_MULTIPLIER: parseInt(process.env.IGNITION_VOLUME_MULTIPLIER, 10) || 10,
             USE_FLASH_TRAILING_STOP: isTrue('USE_FLASH_TRAILING_STOP'),
-            FLASH_TRAILING_STOP_PCT: parseFloat(process.env.FLASH_TRAILING_STOP_PCT) || 1.5,
+            FLASH_SL_DELTA_PCT: parseFloat(process.env.FLASH_SL_DELTA_PCT) || 1.5,
+            FLASH_SL_BREAKEVEN_TRIGGER_PCT: parseFloat(process.env.FLASH_SL_BREAKEVEN_TRIGGER_PCT) || 0.2,
+            FLASH_SL_BREAKEVEN_OFFSET_PCT: parseFloat(process.env.FLASH_SL_BREAKEVEN_OFFSET_PCT) || 0.05,
+            USE_REVERSAL_EXIT_STRATEGY: isTrue('USE_REVERSAL_EXIT_STRATEGY'),
+            MAX_TRADE_DURATION_MINUTES: parseInt(process.env.MAX_TRADE_DURATION_MINUTES, 10) || 0,
         };
         await fs.writeFile(SETTINGS_FILE_PATH, JSON.stringify(botState.settings, null, 2));
     }
@@ -702,15 +703,6 @@ class RealtimeAnalyzer {
                 pair.conditions.score_1m = score_1m;
 
                 let tradeSettings = { ...botState.settings };
-                if (botState.settings.USE_DYNAMIC_PROFILE_SELECTOR) {
-                    if (pair.adx_15m !== undefined && pair.adx_1m < tradeSettings.ADX_THRESHOLD_RANGE) {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Scalpeur'] };
-                    } else if (pair.atr_pct_15m !== undefined && pair.atr_pct_15m > tradeSettings.ATR_PCT_THRESHOLD_VOLATILE) {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Chasseur de Volatilité'] };
-                    } else {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Sniper'] };
-                    }
-                }
                 
                 const directTradeThreshold = is_ignition_signal ? 3 : 4;
                 const pendingThreshold = 3;
@@ -1283,33 +1275,6 @@ async function runScannerCycle() {
     }
 }
 
-const settingProfiles = {
-    'Le Sniper': {
-        POSITION_SIZE_PCT: 2.0, MAX_OPEN_POSITIONS: 3, REQUIRE_STRONG_BUY: true, USE_RSI_SAFETY_FILTER: true,
-        RSI_OVERBOUGHT_THRESHOLD: 65, USE_PARABOLIC_FILTER: true, PARABOLIC_FILTER_PERIOD_MINUTES: 5,
-        PARABOLIC_FILTER_THRESHOLD_PCT: 2.5, USE_ATR_STOP_LOSS: true, ATR_MULTIPLIER: 1.5, USE_PARTIAL_TAKE_PROFIT: true,
-        PARTIAL_TP_TRIGGER_PCT: 1.0, PARTIAL_TP_SELL_QTY_PCT: 50, USE_AUTO_BREAKEVEN: true, BREAKEVEN_TRIGGER_R: 1.0,
-        ADJUST_BREAKEVEN_FOR_FEES: true, TRANSACTION_FEE_PCT: 0.1, USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.5, TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5, RISK_REWARD_RATIO: 5.0,
-        USE_AGGRESSIVE_ENTRY_LOGIC: false,
-    },
-    'Le Scalpeur': {
-        POSITION_SIZE_PCT: 3.0, MAX_OPEN_POSITIONS: 5, REQUIRE_STRONG_BUY: false, USE_RSI_SAFETY_FILTER: true,
-        RSI_OVERBOUGHT_THRESHOLD: 70, USE_PARABOLIC_FILTER: true, PARABOLIC_FILTER_PERIOD_MINUTES: 5,
-        PARABOLIC_FILTER_THRESHOLD_PCT: 3.5, USE_ATR_STOP_LOSS: false, STOP_LOSS_PCT: 0.3, RISK_REWARD_RATIO: 2.0,
-        USE_PARTIAL_TAKE_PROFIT: false, USE_AUTO_BREAKEVEN: false, ADJUST_BREAKEVEN_FOR_FEES: false,
-        TRANSACTION_FEE_PCT: 0.1, USE_ADAPTIVE_TRAILING_STOP: false, USE_AGGRESSIVE_ENTRY_LOGIC: false,
-    },
-    'Le Chasseur de Volatilité': {
-        POSITION_SIZE_PCT: 4.0, MAX_OPEN_POSITIONS: 8, REQUIRE_STRONG_BUY: false, USE_RSI_SAFETY_FILTER: false,
-        RSI_OVERBOUGHT_THRESHOLD: 80, USE_PARABOLIC_FILTER: false, USE_ATR_STOP_LOSS: true, ATR_MULTIPLIER: 2.0,
-        RISK_REWARD_RATIO: 3.0, USE_PARTIAL_TAKE_PROFIT: false, USE_AUTO_BREAKEVEN: true, BREAKEVEN_TRIGGER_R: 2.0,
-        ADJUST_BREAKEVEN_FOR_FEES: true, TRANSACTION_FEE_PCT: 0.1, USE_ADAPTIVE_TRAILING_STOP: true,
-        TRAILING_STOP_TIGHTEN_THRESHOLD_R: 1.0, TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: 0.5,
-        USE_AGGRESSIVE_ENTRY_LOGIC: true,
-    }
-};
-
 let tradeProcessingLock = false;
 
 // --- Trading Engine ---
@@ -1666,10 +1631,14 @@ const tradingEngine = {
                     TRAILING_STOP_TIGHTEN_THRESHOLD_R: tradeSettings.TRAILING_STOP_TIGHTEN_THRESHOLD_R,
                     TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: tradeSettings.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION,
                     USE_FLASH_TRAILING_STOP: tradeSettings.USE_FLASH_TRAILING_STOP,
-                    FLASH_TRAILING_STOP_PCT: tradeSettings.FLASH_TRAILING_STOP_PCT,
+                    FLASH_SL_DELTA_PCT: tradeSettings.FLASH_SL_DELTA_PCT,
+                    FLASH_SL_BREAKEVEN_TRIGGER_PCT: tradeSettings.FLASH_SL_BREAKEVEN_TRIGGER_PCT,
+                    FLASH_SL_BREAKEVEN_OFFSET_PCT: tradeSettings.FLASH_SL_BREAKEVEN_OFFSET_PCT,
                     USE_PARTIAL_TAKE_PROFIT: tradeSettings.USE_PARTIAL_TAKE_PROFIT,
                     PARTIAL_TP_TRIGGER_PCT: tradeSettings.PARTIAL_TP_TRIGGER_PCT,
                     PARTIAL_TP_SELL_QTY_PCT: tradeSettings.PARTIAL_TP_SELL_QTY_PCT,
+                    USE_REVERSAL_EXIT_STRATEGY: tradeSettings.USE_REVERSAL_EXIT_STRATEGY,
+                    MAX_TRADE_DURATION_MINUTES: tradeSettings.MAX_TRADE_DURATION_MINUTES,
                 }
             };
     
@@ -1817,10 +1786,10 @@ const tradingEngine = {
             const isIgnition = pos.strategy_type === 'IGNITION';
 
             if (isIgnition && s.USE_FLASH_TRAILING_STOP) {
-                if (!pos.is_at_breakeven && pnlPct >= 0.5) {
+                if (!pos.is_at_breakeven && pnlPct >= s.FLASH_SL_BREAKEVEN_TRIGGER_PCT) {
                     pos.is_at_breakeven = true;
                     changes.is_at_breakeven = 1;
-                    const newStopLoss = pos.average_entry_price * 1.0005;
+                    const newStopLoss = pos.average_entry_price * (1 + s.FLASH_SL_BREAKEVEN_OFFSET_PCT / 100);
                     if (newStopLoss > pos.stop_loss) {
                         pos.stop_loss = newStopLoss;
                         changes.stop_loss = newStopLoss;
@@ -1828,7 +1797,7 @@ const tradingEngine = {
                     }
                 }
                 if (pos.is_at_breakeven) {
-                    const newTrailingSL = pos.highest_price_since_entry * (1 - s.FLASH_TRAILING_STOP_PCT / 100);
+                    const newTrailingSL = pos.highest_price_since_entry * (1 - s.FLASH_SL_DELTA_PCT / 100);
                     if (newTrailingSL > pos.stop_loss) {
                         pos.stop_loss = newTrailingSL;
                         changes.stop_loss = newTrailingSL;
@@ -1871,6 +1840,26 @@ const tradingEngine = {
                 }
             }
             
+            if (s.USE_REVERSAL_EXIT_STRATEGY) {
+                const klines1m = realtimeAnalyzer.klineData.get(pos.symbol)?.get('1m');
+                if (klines1m && klines1m.length > 0) {
+                    const lastCandle = klines1m[klines1m.length - 1];
+                    // Ensure it's not the entry candle
+                    if (new Date(pos.entry_time).getTime() < lastCandle.openTime && lastCandle.close < lastCandle.open) {
+                        positionsToClose.push({ trade: pos, exitPrice: currentPrice, reason: 'Reversal Exit (1m)' });
+                        continue;
+                    }
+                }
+            }
+
+            if (s.MAX_TRADE_DURATION_MINUTES > 0) {
+                const tradeDurationMs = Date.now() - new Date(pos.entry_time).getTime();
+                if (tradeDurationMs > s.MAX_TRADE_DURATION_MINUTES * 60 * 1000) {
+                    positionsToClose.push({ trade: pos, exitPrice: currentPrice, reason: 'Max Duration' });
+                    continue;
+                }
+            }
+
             if (currentPrice <= pos.stop_loss) {
                 positionsToClose.push({ trade: pos, exitPrice: pos.stop_loss, reason: 'Stop Loss' });
                 continue;
@@ -1937,15 +1926,23 @@ const tradingEngine = {
         trade.exit_time = new Date().toISOString();
         trade.status = 'CLOSED';
 
-        const exitValue = exitPrice * trade.quantity;
-        const pnl = (trade.realized_pnl || 0) + exitValue - trade.total_cost_usd;
-        const initialFullPositionValue = trade.average_entry_price * trade.target_quantity;
+        const s = trade.management_settings || botState.settings;
+        const feeRate = s.TRANSACTION_FEE_PCT / 100;
 
-        trade.pnl = pnl;
-        trade.pnl_pct = initialFullPositionValue > 0 ? (pnl / initialFullPositionValue) * 100 : 0;
+        const costOfFinalPortion = trade.average_entry_price * trade.quantity;
+        const valueOfFinalPortion = exitPrice * trade.quantity;
+        const entryFeeFinalPortion = costOfFinalPortion * feeRate;
+        const exitFeeFinalPortion = valueOfFinalPortion * feeRate;
+        const pnlFinalPortion = valueOfFinalPortion - costOfFinalPortion - entryFeeFinalPortion - exitFeeFinalPortion;
+
+        const totalNetPnl = (trade.realized_pnl || 0) + pnlFinalPortion;
+        const initialFullPositionValue = trade.average_entry_price * trade.target_quantity;
+        
+        trade.pnl = totalNetPnl;
+        trade.pnl_pct = initialFullPositionValue > 0 ? (totalNetPnl / initialFullPositionValue) * 100 : 0;
         
         // Cool-down dynamic
-        if (botState.settings.LOSS_COOLDOWN_HOURS > 0 && pnl < 0) {
+        if (botState.settings.LOSS_COOLDOWN_HOURS > 0 && totalNetPnl < 0) {
             const cooldownHours = botState.settings.LOSS_COOLDOWN_HOURS * (1 + Math.abs(trade.pnl_pct) / 2);
             const cooldownUntil = Date.now() + cooldownHours * 60 * 60 * 1000;
             botState.recentlyLostSymbols.set(trade.symbol, { until: cooldownUntil });
@@ -1963,10 +1960,10 @@ const tradingEngine = {
             botState.tradeHistory.push(trade);
 
             if (trade.mode === 'VIRTUAL') {
-                botState.balance += trade.total_cost_usd + pnl;
+                botState.balance += trade.total_cost_usd + totalNetPnl;
                 await setKeyValue('balance', botState.balance);
             } else {
-                botState.balance += pnl;
+                botState.balance += totalNetPnl;
                 await setKeyValue('balance', botState.balance);
             }
         } catch(dbError) {
@@ -1994,13 +1991,13 @@ const tradingEngine = {
             }
         }
 
-        botState.dailyPnl += pnl;
+        botState.dailyPnl += totalNetPnl;
         await setKeyValue('dailyPnl', botState.dailyPnl);
 
-        if (pnl < 0) {
+        if (totalNetPnl < 0) {
             botState.consecutiveLosses++;
             botState.consecutiveWins = 0;
-        } else if (pnl > 0) {
+        } else if (totalNetPnl > 0) {
             botState.consecutiveWins++;
             botState.consecutiveLosses = 0;
             if (botState.circuitBreakerStatus === 'PAUSED_LOSS_STREAK') {
@@ -2019,7 +2016,7 @@ const tradingEngine = {
             log('TRADE', `[${trade.symbol}] placed on cooldown until ${new Date(cooldownUntil).toLocaleString()}`);
         }
         
-        log('TRADE', `<<< TRADE CLOSED >>> [${reason}] Closed ${trade.symbol} at $${exitPrice.toFixed(4)}. PnL: $${pnl.toFixed(2)} (${trade.pnl_pct.toFixed(2)}%)`);
+        log('TRADE', `<<< TRADE CLOSED >>> [${reason}] Closed ${trade.symbol} at $${exitPrice.toFixed(4)}. Net PnL: $${totalNetPnl.toFixed(2)} (${trade.pnl_pct.toFixed(2)}%)`);
         return trade;
     },
     
@@ -2050,18 +2047,23 @@ const tradingEngine = {
             }
         }
 
-        const pnlFromSale = (actualSellPrice - position.average_entry_price) * sellQty;
+        const feeRate = (settings.TRANSACTION_FEE_PCT || 0) / 100;
+        const costOfSoldPortion = position.average_entry_price * sellQty;
+        const valueOfSoldPortion = actualSellPrice * sellQty;
+        const entryFeeForPortion = costOfSoldPortion * feeRate;
+        const exitFeeForPortion = valueOfSoldPortion * feeRate;
+        const netPnlFromSale = valueOfSoldPortion - costOfSoldPortion - entryFeeForPortion - exitFeeForPortion;
 
         position.quantity -= sellQty;
-        position.total_cost_usd -= position.average_entry_price * sellQty;
-        position.realized_pnl = (position.realized_pnl || 0) + pnlFromSale;
+        position.total_cost_usd -= costOfSoldPortion;
+        position.realized_pnl = (position.realized_pnl || 0) + netPnlFromSale;
         position.partial_tp_hit = true;
         
         await db.run(
             'UPDATE trades SET quantity = ?, total_cost_usd = ?, realized_pnl = ?, partial_tp_hit = 1 WHERE id = ?',
             position.quantity, position.total_cost_usd, position.realized_pnl, position.id
         );
-        log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${actualSellPrice.toFixed(4)}. Realized PnL: $${pnlFromSale.toFixed(2)}`);
+        log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${actualSellPrice.toFixed(4)}. Realized Net PnL: $${netPnlFromSale.toFixed(2)}`);
     }
 };
 

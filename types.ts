@@ -1,3 +1,4 @@
+
 export enum TradingMode {
   VIRTUAL = "VIRTUAL",
   REAL_PAPER = "REAL_PAPER",
@@ -77,10 +78,14 @@ export interface Trade {
       TRAILING_STOP_TIGHTEN_THRESHOLD_R: number;
       TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION: number;
       USE_FLASH_TRAILING_STOP: boolean;
-      FLASH_TRAILING_STOP_PCT: number;
+      FLASH_SL_DELTA_PCT: number;
+      FLASH_SL_BREAKEVEN_TRIGGER_PCT: number;
+      FLASH_SL_BREAKEVEN_OFFSET_PCT: number;
       USE_PARTIAL_TAKE_PROFIT: boolean;
       PARTIAL_TP_TRIGGER_PCT: number;
       PARTIAL_TP_SELL_QTY_PCT: number;
+      USE_REVERSAL_EXIT_STRATEGY: boolean;
+      MAX_TRADE_DURATION_MINUTES: number;
   };
 }
 
@@ -209,12 +214,6 @@ export interface BotSettings {
     // The single source of truth for the RSI safety filter toggle
     USE_RSI_SAFETY_FILTER: boolean;
 
-    // --- ADAPTIVE BEHAVIOR ---
-    USE_DYNAMIC_PROFILE_SELECTOR: boolean;
-    ADX_THRESHOLD_RANGE: number; // e.g., below 20 indicates a ranging market
-    ATR_PCT_THRESHOLD_VOLATILE: number; // e.g., above 5% indicates a volatile market
-    USE_AGGRESSIVE_ENTRY_LOGIC: boolean; // For specific profiles like Volatility Hunter
-    
     // Adaptive Trailing Stop
     USE_ADAPTIVE_TRAILING_STOP: boolean;
     TRAILING_STOP_TIGHTEN_THRESHOLD_R: number; // e.g., 1.5 (for 1.5R)
@@ -255,5 +254,15 @@ export interface BotSettings {
     IGNITION_PRICE_THRESHOLD_PCT: number;
     IGNITION_VOLUME_MULTIPLIER: number;
     USE_FLASH_TRAILING_STOP: boolean;
-    FLASH_TRAILING_STOP_PCT: number;
+    FLASH_SL_DELTA_PCT: number;
+    FLASH_SL_BREAKEVEN_TRIGGER_PCT: number;
+    FLASH_SL_BREAKEVEN_OFFSET_PCT: number;
+
+    // --- ADVANCED EXIT TACTICS ---
+    USE_REVERSAL_EXIT_STRATEGY: boolean;
+    MAX_TRADE_DURATION_MINUTES: number;
+
+    // Fix: Add missing properties for scanner display logic
+    ADX_THRESHOLD_RANGE: number;
+    ATR_PCT_THRESHOLD_VOLATILE: number;
 }
