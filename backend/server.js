@@ -586,12 +586,142 @@ class RealtimeAnalyzer {
         this.settings = {};
         this.klineData = new Map(); // Map<symbol, Map<interval, kline[]>>
         this.hydrating = new Set();
+        this.microTriggerQueue = new Set();
+        this.isProcessingQueue = false;
+        this.queueTimeout = null;
     }
 
     updateSettings(newSettings) {
         this.log('INFO', '[Analyzer] Settings updated for Macro-Micro strategy.');
         this.settings = newSettings;
     }
+    
+    async processMicroTriggerQueue() {
+        if (this.isProcessingQueue) return;
+        this.isProcessingQueue = true;
+
+        try {
+            const symbolsToProcess = Array.from(this.microTriggerQueue);
+            this.microTriggerQueue.clear();
+
+            if (symbolsToProcess.length === 0) return;
+            
+            this.log('TRADE', `[QUEUE] Processing ${symbolsToProcess.length} potential 1m signals...`);
+
+            const potentialTrades = [];
+            for (const symbol of symbolsToProcess) {
+                const pair = botState.scannerCache.find(p => p.symbol === symbol);
+                if (!pair || !pair.is_on_hotlist || botState.pendingConfirmation.has(symbol)) continue;
+
+                const klines1m = this.klineData.get(symbol)?.get('1m');
+                if (!klines1m || klines1m.length < 61) continue;
+
+                const closes1m = klines1m.map(k => k.close);
+                const volumes1m = klines1m.map(k => k.volume);
+                
+                let score_1m = 0;
+                
+                const lastEma9 = EMA.calculate({ period: 9, values: closes1m }).pop();
+                if (klines1m[klines1m.length - 1].close > lastEma9) score_1m++;
+                
+                const rsi_1m_values = RSI.calculate({ period: 14, values: closes1m });
+                const last_rsi_1m = rsi_1m_values[rsi_1m_values.length - 1];
+                const prev_rsi_1m = rsi_1m_values[rsi_1m_values.length - 2];
+                if (last_rsi_1m > 50 && prev_rsi_1m <= 50) score_1m++;
+                
+                const macd_1m_values = MACD.calculate({ values: closes1m, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, simpleMAOscillator: false, simpleMASignal: false });
+                const last_macd_1m = macd_1m_values[macd_1m_values.length - 1];
+                const prev_macd_1m = macd_1m_values[macd_1m_values.length - 2];
+                if (last_macd_1m && prev_macd_1m && last_macd_1m.MACD > last_macd_1m.signal && prev_macd_1m.MACD <= prev_macd_1m.signal) score_1m++;
+
+                const avgVolume = volumes1m.slice(-21, -1).reduce((sum, v) => sum + v, 0) / 20;
+                const volumeRatio = volumes1m[volumes1m.length - 1] / avgVolume;
+                if (volumeRatio > 1.5) score_1m += 2;
+
+                const is_ignition_signal = (volumeRatio > 1.5 && last_rsi_1m > 55 && last_macd_1m && last_macd_1m.MACD > 0);
+                pair.conditions.score_1m = score_1m;
+
+                let tradeSettings = { ...botState.settings };
+                if (botState.settings.USE_DYNAMIC_PROFILE_SELECTOR) {
+                    if (pair.adx_15m !== undefined && pair.adx_1m < tradeSettings.ADX_THRESHOLD_RANGE) {
+                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Scalpeur'] };
+                    } else if (pair.atr_pct_15m !== undefined && pair.atr_pct_15m > tradeSettings.ATR_PCT_THRESHOLD_VOLATILE) {
+                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Chasseur de Volatilité'] };
+                    } else {
+                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Sniper'] };
+                    }
+                }
+                
+                const directTradeThreshold = is_ignition_signal ? 3 : 4;
+                const pendingThreshold = 3;
+
+                if (tradeSettings.USE_MTF_VALIDATION === false) {
+                    if (score_1m >= directTradeThreshold) {
+                        potentialTrades.push({
+                            pair,
+                            score: score_1m,
+                            slPriceReference: klines1m[klines1m.length - 1].low,
+                            tradeSettings,
+                            strategy_type: is_ignition_signal ? 'IGNITION' : 'PRECISION',
+                            isMtf: false
+                        });
+                    }
+                } else {
+                    if (score_1m >= pendingThreshold) {
+                        potentialTrades.push({
+                            pair,
+                            score: score_1m,
+                            slPriceReference: klines1m[klines1m.length - 1].low,
+                            triggerPrice: klines1m[klines1m.length - 1].close,
+                            tradeSettings,
+                            strategy_type: is_ignition_signal ? 'IGNITION' : 'PRECISION',
+                            is_ignition_signal,
+                            micro_score_1m: score_1m,
+                            isMtf: true
+                        });
+                    }
+                }
+            }
+
+            potentialTrades.sort((a, b) => b.score - a.score);
+
+            for (const item of potentialTrades) {
+                if (item.isMtf) {
+                    item.pair.score = 'PENDING_CONFIRMATION';
+                    item.pair.strategy_type = item.strategy_type;
+                    botState.pendingConfirmation.set(item.pair.symbol, {
+                        triggerPrice: item.triggerPrice,
+                        triggerTimestamp: Date.now(),
+                        slPriceReference: item.slPriceReference,
+                        settings: item.tradeSettings,
+                        strategy_type: item.strategy_type,
+                        is_ignition_signal: item.is_ignition_signal,
+                        micro_score_1m: item.micro_score_1m,
+                    });
+                    this.log('TRADE', `[QUEUE] Setting ${item.pair.symbol} to PENDING_CONFIRMATION (Score: ${item.score}).`);
+                    broadcast({ type: 'SCANNER_UPDATE', payload: item.pair });
+                } else {
+                    if (botState.activePositions.length >= item.tradeSettings.MAX_OPEN_POSITIONS) {
+                        this.log('TRADE', `[QUEUE] Max positions reached. Halting queue processing. ${potentialTrades.length - potentialTrades.indexOf(item)} signals will be dropped.`);
+                        break;
+                    }
+                    this.log('TRADE', `[QUEUE] Evaluating direct trade for ${item.pair.symbol} (Score: ${item.score}).`);
+                    const tradeOpened = await tradingEngine.evaluateAndOpenTrade(item.pair, item.slPriceReference, item.tradeSettings);
+                    if (tradeOpened) {
+                        item.pair.is_on_hotlist = false;
+                        item.pair.strategy_type = undefined;
+                        await removeSymbolFromMicroStreams(item.pair.symbol);
+                        broadcast({ type: 'SCANNER_UPDATE', payload: item.pair });
+                    }
+                }
+            }
+             await savePendingConfirmationToDb(); // Save all pending changes at once
+
+        } finally {
+            this.isProcessingQueue = false;
+        }
+    }
+
 
     // Phase 1: 15m analysis to qualify pairs for the Hotlist (HYBRID ENGINE)
     analyze15mIndicators(symbolOrPair) {
@@ -695,94 +825,6 @@ class RealtimeAnalyzer {
         broadcast({ type: 'SCANNER_UPDATE', payload: pairToUpdate });
     }
     
-    // Phase 2: 1m analysis to find the precision entry for pairs on the Hotlist
-    async checkForMicroTrigger(symbol, tradeSettings) {
-        const pair = botState.scannerCache.find(p => p.symbol === symbol);
-        if (!pair || !pair.is_on_hotlist || botState.pendingConfirmation.has(symbol)) return;
-
-        const klines1m = this.klineData.get(symbol)?.get('1m');
-        if (!klines1m || klines1m.length < 61) return;
-
-        const closes1m = klines1m.map(k => k.close);
-        const volumes1m = klines1m.map(k => k.volume);
-        
-        let score_1m = 0;
-        
-        // Condition 1: Close > EMA9
-        const lastEma9 = EMA.calculate({ period: 9, values: closes1m }).pop();
-        if (klines1m[klines1m.length - 1].close > lastEma9) {
-            score_1m += 1;
-        }
-
-        // Condition 2: RSI Crossover
-        const rsi_1m_values = RSI.calculate({period: 14, values: closes1m});
-        const last_rsi_1m = rsi_1m_values[rsi_1m_values.length - 1];
-        const prev_rsi_1m = rsi_1m_values[rsi_1m_values.length - 2];
-        if(last_rsi_1m > 50 && prev_rsi_1m <= 50) {
-            score_1m += 1;
-        }
-
-        // Condition 3: MACD Crossover
-        const macd_1m_input = { values: closes1m, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, simpleMAOscillator: false, simpleMASignal: false };
-        const macd_1m_values = MACD.calculate(macd_1m_input);
-        const last_macd_1m = macd_1m_values[macd_1m_values.length - 1];
-        const prev_macd_1m = macd_1m_values[macd_1m_values.length - 2];
-        if(last_macd_1m && prev_macd_1m && last_macd_1m.MACD > last_macd_1m.signal && prev_macd_1m.MACD <= prev_macd_1m.signal) {
-            score_1m += 1;
-        }
-
-        // Condition 4: Volume Spike
-        const avgVolume = volumes1m.slice(-21, -1).reduce((sum, v) => sum + v, 0) / 20;
-        const volumeRatio = volumes1m[volumes1m.length - 1] / avgVolume;
-        if (volumeRatio > 1.5) {
-            score_1m += 2; // Ignition boost
-        }
-
-        // Check for Ignition conditions
-        const is_ignition_signal = (volumeRatio > 1.5 && last_rsi_1m > 55 && last_macd_1m && last_macd_1m.MACD > 0);
-        
-        pair.conditions.score_1m = score_1m;
-        if (score_1m <= 0) return; // No signal, exit early
-
-        const strategy_type = is_ignition_signal ? 'IGNITION' : 'PRECISION';
-        const triggerCandle = klines1m[klines1m.length-1];
-
-        // Case 1: MTF Validation is DISABLED. Evaluate the trade directly.
-        if (tradeSettings.USE_MTF_VALIDATION === false) {
-            const directTradeThreshold = is_ignition_signal ? 3 : 4;
-            if (score_1m >= directTradeThreshold) {
-                this.log('TRADE', `[DIRECT TRIGGER 1m - ${strategy_type}] MTF OFF for ${symbol}. Score ${score_1m} >= ${directTradeThreshold}. Evaluating trade entry.`);
-                const tradeOpened = await tradingEngine.evaluateAndOpenTrade(pair, triggerCandle.low, tradeSettings);
-                if (tradeOpened) {
-                    pair.is_on_hotlist = false;
-                    pair.strategy_type = undefined;
-                    removeSymbolFromMicroStreams(symbol);
-                    broadcast({ type: 'SCANNER_UPDATE', payload: pair });
-                }
-            }
-            return;
-        }
-        
-        // Case 2: MTF Validation is ENABLED. Set to pending.
-        const pendingThreshold = 3;
-        if (score_1m >= pendingThreshold) {
-            pair.score = 'PENDING_CONFIRMATION';
-            pair.strategy_type = strategy_type;
-            botState.pendingConfirmation.set(symbol, {
-                triggerPrice: triggerCandle.close,
-                triggerTimestamp: Date.now(),
-                slPriceReference: triggerCandle.low,
-                settings: tradeSettings,
-                strategy_type: strategy_type,
-                is_ignition_signal: is_ignition_signal,
-                micro_score_1m: score_1m,
-            });
-            await savePendingConfirmationToDb();
-            this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Strategy: ${strategy_type}`);
-            broadcast({ type: 'SCANNER_UPDATE', payload: pair });
-        }
-    }
-
     async validate5mConfirmation(symbol, new5mCandle) {
         const pendingSignal = botState.pendingConfirmation.get(symbol);
         if (!pendingSignal) return;
@@ -878,21 +920,13 @@ class RealtimeAnalyzer {
         } else if (interval === '5m') {
             this.validate5mConfirmation(symbol, kline);
         } else if (interval === '1m') {
-            let tradeSettings = { ...botState.settings };
-            if (botState.settings.USE_DYNAMIC_PROFILE_SELECTOR) {
-                const pair = botState.scannerCache.find(p => p.symbol === symbol);
-                if(pair) {
-                    if (pair.adx_15m !== undefined && pair.adx_15m < tradeSettings.ADX_THRESHOLD_RANGE) {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Scalpeur'] };
-                    } else if (pair.atr_pct_15m !== undefined && pair.atr_pct_15m > tradeSettings.ATR_PCT_THRESHOLD_VOLATILE) {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Chasseur de Volatilité'] };
-                    } else {
-                        tradeSettings = { ...tradeSettings, ...settingProfiles['Le Sniper'] };
-                    }
-                }
-            }
-            this.checkForMicroTrigger(symbol, tradeSettings);
+            this.microTriggerQueue.add(symbol);
+            if (this.queueTimeout) clearTimeout(this.queueTimeout);
+            this.queueTimeout = setTimeout(() => {
+                this.processMicroTriggerQueue();
+            }, 500);
 
+            const tradeSettings = { ...botState.settings };
             if (tradeSettings.SCALING_IN_CONFIG && tradeSettings.SCALING_IN_CONFIG.trim() !== '') {
                 const position = botState.activePositions.find(p => p.symbol === symbol && p.is_scaling_in);
                 if (position && kline.close > kline.open) { // Bullish confirmation candle
@@ -1219,14 +1253,16 @@ let tradeProcessingLock = false;
 // --- Trading Engine ---
 const tradingEngine = {
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
-        // ensure rules are fresh before real order
-        if (botState.tradingMode === 'REAL_LIVE') await initExchangeInfo();
         if (tradeProcessingLock) {
-            log('TRADE', `[QUEUE] Another trade is being processed. Skipping ${pair.symbol} for now.`);
+            // This check is now a secondary safeguard; the primary control is the sequential queue.
+            log('TRADE', `[QUEUE] Lock active, skipping evaluation for ${pair.symbol}.`);
             return false;
         }
         tradeProcessingLock = true;
         try {
+            // ensure rules are fresh before real order
+            if (botState.tradingMode === 'REAL_LIVE') await initExchangeInfo();
+        
             if (!botState.isRunning) {
                 log('TRADE', `[FILTER] Trade for ${pair.symbol} rejected: Bot is not running.`);
                 return false;
