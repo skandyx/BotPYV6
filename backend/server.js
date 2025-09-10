@@ -277,16 +277,45 @@ const initDb = async () => {
 const getKeyValue = async (key) => (await db.get('SELECT value FROM key_value_store WHERE key = ?', key))?.value;
 const setKeyValue = async (key, value) => await db.run('INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)', key, value);
 
+const saveHotlistToDb = async () => {
+    await setKeyValue('hotlist', JSON.stringify(Array.from(botState.hotlist)));
+};
+
+const savePendingConfirmationToDb = async () => {
+    await setKeyValue('pendingConfirmation', JSON.stringify(Array.from(botState.pendingConfirmation.entries())));
+};
+
+
 const parseDbTrade = (dbRow) => {
     if (!dbRow) return null;
+    
+    let entrySnapshot = null;
+    let managementSettings = null;
+
+    try {
+        if (dbRow.entry_snapshot) {
+            entrySnapshot = JSON.parse(dbRow.entry_snapshot);
+        }
+    } catch (e) {
+        log('ERROR', `Failed to parse entry_snapshot for trade ID ${dbRow.id}: ${e.message}`);
+    }
+
+    try {
+        if (dbRow.management_settings) {
+            managementSettings = JSON.parse(dbRow.management_settings);
+        }
+    } catch (e) {
+        log('ERROR', `Failed to parse management_settings for trade ID ${dbRow.id}: ${e.message}`);
+    }
+
     return {
         ...dbRow,
         is_at_breakeven: !!dbRow.is_at_breakeven,
         partial_tp_hit: !!dbRow.partial_tp_hit,
         trailing_stop_tightened: !!dbRow.trailing_stop_tightened,
         is_scaling_in: !!dbRow.is_scaling_in,
-        entry_snapshot: dbRow.entry_snapshot ? JSON.parse(dbRow.entry_snapshot) : null,
-        management_settings: dbRow.management_settings ? JSON.parse(dbRow.management_settings) : null,
+        entry_snapshot: entrySnapshot,
+        management_settings: managementSettings,
     };
 };
 
@@ -296,8 +325,10 @@ const prepareTradeForDb = (trade) => {
         dbTrade[key] = dbTrade[key] ? 1 : 0;
     }
     for (const key of ['entry_snapshot', 'management_settings']) {
-        if (dbTrade[key]) {
+        if (dbTrade[key] && typeof dbTrade[key] === 'object') {
             dbTrade[key] = JSON.stringify(dbTrade[key]);
+        } else {
+            dbTrade[key] = null;
         }
     }
     return dbTrade;
@@ -343,8 +374,8 @@ const loadData = async () => {
     try {
         const settingsContent = await fs.readFile(SETTINGS_FILE_PATH, 'utf-8');
         botState.settings = JSON.parse(settingsContent);
-    } catch {
-        log("WARN", "settings.json not found. Loading from .env defaults.");
+    } catch (err) {
+        log("WARN", `settings.json not found or corrupted (${err.message}). Loading from .env defaults.`);
         
         const isNotFalse = (envVar) => process.env[envVar] !== 'false';
         const isTrue = (envVar) => process.env[envVar] === 'true';
@@ -429,6 +460,8 @@ const loadData = async () => {
     await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('consecutiveLosses', '0')");
     await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('consecutiveWins', '0')");
     await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('currentTradingDay', ?)", new Date().toISOString().split('T')[0]);
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('hotlist', '[]')");
+    await db.run("INSERT OR IGNORE INTO key_value_store (key, value) VALUES ('pendingConfirmation', '[]')");
 
     // 4. Load state from DB into memory
     botState.balance = parseFloat(await getKeyValue('balance'));
@@ -439,6 +472,21 @@ const loadData = async () => {
     botState.consecutiveLosses = parseInt(await getKeyValue('consecutiveLosses'), 10);
     botState.consecutiveWins = parseInt(await getKeyValue('consecutiveWins'), 10);
     botState.currentTradingDay = await getKeyValue('currentTradingDay');
+    
+    try {
+        const hotlistJson = await getKeyValue('hotlist');
+        if (hotlistJson) botState.hotlist = new Set(JSON.parse(hotlistJson));
+    } catch (e) {
+        log('ERROR', `Could not load hotlist from DB, starting fresh: ${e.message}`);
+        botState.hotlist = new Set();
+    }
+    try {
+        const pendingJson = await getKeyValue('pendingConfirmation');
+        if (pendingJson) botState.pendingConfirmation = new Map(JSON.parse(pendingJson));
+    } catch (e) {
+        log('ERROR', `Could not load pending confirmations from DB, starting fresh: ${e.message}`);
+        botState.pendingConfirmation = new Map();
+    }
 
     const allTrades = await db.all('SELECT * FROM trades');
     botState.activePositions = allTrades.filter(t => t.status !== 'CLOSED').map(parseDbTrade);
@@ -450,8 +498,8 @@ const loadData = async () => {
     try {
         const authContent = await fs.readFile(AUTH_FILE_PATH, 'utf-8');
         botState.passwordHash = JSON.parse(authContent).passwordHash;
-    } catch {
-        log("WARN", "auth.json not found. Initializing from .env.");
+    } catch (err) {
+        log("WARN", `auth.json not found or corrupted (${err.message}). Initializing from .env.`);
         const initialPassword = process.env.APP_PASSWORD;
         if (!initialPassword) {
             log('ERROR', 'CRITICAL: APP_PASSWORD is not set in .env. Please set it and restart.');
@@ -702,6 +750,7 @@ class RealtimeAnalyzer {
                 is_ignition_signal: is_ignition_signal,
                 micro_score_1m: score_1m,
             });
+            await savePendingConfirmationToDb();
             this.log('TRADE', `[MICRO TRIGGER 1m] Signal for ${symbol} with score ${score_1m}. Pending 5m confirmation. Strategy: ${strategy_type}`);
             broadcast({ type: 'SCANNER_UPDATE', payload: pair });
         }
@@ -751,6 +800,7 @@ class RealtimeAnalyzer {
         }
         
         botState.pendingConfirmation.delete(symbol);
+        await savePendingConfirmationToDb();
         broadcast({ type: 'SCANNER_UPDATE', payload: pair });
     }
 
@@ -953,8 +1003,9 @@ function updateBinanceSubscriptions(baseSymbols) {
     newStreams.forEach(s => subscribedStreams.add(s));
 }
 
-function addSymbolToMicroStreams(symbol) {
+async function addSymbolToMicroStreams(symbol) {
     botState.hotlist.add(symbol);
+    await saveHotlistToDb();
     const streamsToAdd = [`${symbol.toLowerCase()}@kline_1m`, `${symbol.toLowerCase()}@kline_5m`];
     const newStreams = streamsToAdd.filter(s => !subscribedStreams.has(s));
     
@@ -969,8 +1020,9 @@ function addSymbolToMicroStreams(symbol) {
     }
 }
 
-function removeSymbolFromMicroStreams(symbol) {
+async function removeSymbolFromMicroStreams(symbol) {
     botState.hotlist.delete(symbol);
+    await saveHotlistToDb();
     const streamsToRemove = [`${symbol.toLowerCase()}@kline_1m`, `${symbol.toLowerCase()}@kline_5m`];
     const streamsToUnsub = streamsToRemove.filter(s => subscribedStreams.has(s));
 
@@ -1047,7 +1099,10 @@ async function runScannerCycle() {
         if (discoveredPairs.length === 0) {
             log('SCANNER', 'Scanner cycle found 0 pairs meeting criteria. Clearing cache and hotlist.');
             botState.scannerCache = [];
-            botState.hotlist.clear();
+            if (botState.hotlist.size > 0) {
+                botState.hotlist.clear();
+                await saveHotlistToDb();
+            }
         } else {
             const existingPairsMap = new Map(botState.scannerCache.map(p => [p.symbol, p]));
             const newScannerCache = [];
@@ -1079,12 +1134,15 @@ async function runScannerCycle() {
 
             // Phase 3: Clean up the hotlist. A symbol should not be on the hotlist if it's no longer in the main scanner cache.
             const currentSymbols = new Set(botState.scannerCache.map(p => p.symbol));
+            let hotlistChanged = false;
             for (const hotSymbol of botState.hotlist) {
                 if (!currentSymbols.has(hotSymbol)) {
                     botState.hotlist.delete(hotSymbol);
+                    hotlistChanged = true;
                     log('SCANNER', `[HOTLIST CLEANUP] Removed ${hotSymbol} as it's no longer in the scanner's scope.`);
                 }
             }
+            if (hotlistChanged) await saveHotlistToDb();
             
             // Phase 4: Asynchronously fetch historical kline data for any brand new pairs.
             if (newPairsToHydrate.length > 0) {
@@ -1288,6 +1346,10 @@ const tradingEngine = {
                 }
                 try {
                     const formattedQty = formatQuantity(pair.symbol, initial_quantity);
+                    if (formattedQty <= 0) {
+                        log('ERROR', `[REAL_LIVE] Aborting trade for ${pair.symbol}. Calculated quantity is zero or invalid.`);
+                        return false;
+                    }
                     log('TRADE', `>>> [REAL_LIVE] FIRING TRADE <<< Attempting to BUY ${formattedQty} ${pair.symbol} at MARKET price.`);
                     const orderResult = await binanceApiClient.createOrder(pair.symbol, 'BUY', 'MARKET', formattedQty);
                     log('BINANCE_API', `[REAL_LIVE] Order successful for ${pair.symbol}. Order ID: ${orderResult.orderId}`);
@@ -1404,6 +1466,12 @@ const tradingEngine = {
             }
             try {
                 const formattedQty = formatQuantity(position.symbol, chunkQty);
+                if (formattedQty <= 0) {
+                    log('ERROR', `[REAL_LIVE] Aborting scale-in for ${position.symbol}. Calculated quantity is zero or invalid.`);
+                    position.is_scaling_in = false;
+                    await db.run('UPDATE trades SET is_scaling_in = 0 WHERE id = ?', position.id);
+                    return;
+                }
                  log('TRADE', `[REAL_LIVE] Scaling In: Attempting to BUY ${formattedQty} ${position.symbol} at MARKET price.`);
                 const orderResult = await binanceApiClient.createOrder(position.symbol, 'BUY', 'MARKET', formattedQty);
                 log('BINANCE_API', `[REAL_LIVE] Scale-in order successful for ${position.symbol}. Order ID: ${orderResult.orderId}`);
@@ -1460,10 +1528,12 @@ const tradingEngine = {
 
         const now = Date.now();
         const TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+        let pendingChanged = false;
         for (const [symbol, pending] of botState.pendingConfirmation.entries()) {
             if (now - pending.triggerTimestamp > TIMEOUT_MS) {
                 log('TRADE', `[MTF] TIMEOUT: Pending signal for ${symbol} expired.`);
                 botState.pendingConfirmation.delete(symbol);
+                pendingChanged = true;
                 const pair = botState.scannerCache.find(p => p.symbol === symbol);
                 if (pair) {
                     pair.score = 'HOLD';
@@ -1472,6 +1542,7 @@ const tradingEngine = {
                 }
             }
         }
+        if (pendingChanged) await savePendingConfirmationToDb();
 
         const positionsToClose = [];
         for (const pos of botState.activePositions) {
@@ -1538,18 +1609,15 @@ const tradingEngine = {
                 
                 if (s.USE_ADAPTIVE_TRAILING_STOP && pos.is_at_breakeven && pos.entry_snapshot?.atr_15m) {
                     let atrMultiplier = s.ATR_MULTIPLIER;
-                    
-                    if (currentR >= s.TRAILING_STOP_TIGHTEN_THRESHOLD_R) {
+                    if (pos.trailing_stop_tightened || currentR >= s.TRAILING_STOP_TIGHTEN_THRESHOLD_R) {
                         if (!pos.trailing_stop_tightened) {
-                            atrMultiplier -= s.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION;
                             pos.trailing_stop_tightened = true;
                             changes.trailing_stop_tightened = 1;
-                            log('TRADE', `[${pos.symbol}] Adaptive SL: Profit > ${s.TRAILING_STOP_TIGHTEN_THRESHOLD_R}R. Tightening ATR multiplier to ${atrMultiplier.toFixed(2)}.`);
-                        } else {
-                             atrMultiplier -= s.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION;
+                            log('TRADE', `[${pos.symbol}] Adaptive SL: Profit > ${s.TRAILING_STOP_TIGHTEN_THRESHOLD_R}R. Tightening ATR multiplier.`);
                         }
+                        atrMultiplier = Math.max(0.1, s.ATR_MULTIPLIER - s.TRAILING_STOP_TIGHTEN_MULTIPLIER_REDUCTION);
                     }
-                    
+
                     const newTrailingSL = pos.highest_price_since_entry - (pos.entry_snapshot.atr_15m * atrMultiplier);
                     if (newTrailingSL > pos.stop_loss) {
                         pos.stop_loss = newTrailingSL;
@@ -1597,6 +1665,10 @@ const tradingEngine = {
             }
             try {
                 const formattedQty = formatQuantity(trade.symbol, trade.quantity);
+                if (formattedQty <= 0) {
+                    log('ERROR', `[REAL_LIVE] Aborting close trade for ${trade.symbol}. Calculated quantity is zero or invalid.`);
+                    return null;
+                }
                 log('TRADE', `>>> [REAL_LIVE] CLOSING TRADE <<< Selling ${formattedQty} ${trade.symbol} at MARKET.`);
                 const orderResult = await binanceApiClient.createOrder(trade.symbol, 'SELL', 'MARKET', formattedQty);
                 log('BINANCE_API', `[REAL_LIVE] Close order successful for ${trade.symbol}. ID: ${orderResult.orderId}`);
@@ -1611,8 +1683,6 @@ const tradingEngine = {
             }
         }
         
-        botState.activePositions.splice(tradeIndex, 1);
-        
         trade.exit_price = exitPrice;
         trade.exit_time = new Date().toISOString();
         trade.status = 'CLOSED';
@@ -1624,17 +1694,26 @@ const tradingEngine = {
         trade.pnl = pnl;
         trade.pnl_pct = initialFullPositionValue > 0 ? (pnl / initialFullPositionValue) * 100 : 0;
 
-        await db.run(
-            'UPDATE trades SET status = ?, exit_price = ?, exit_time = ?, pnl = ?, pnl_pct = ? WHERE id = ?',
-            'CLOSED', trade.exit_price, trade.exit_time, trade.pnl, trade.pnl_pct, trade.id
-        );
+        try {
+            await db.run(
+                'UPDATE trades SET status = ?, exit_price = ?, exit_time = ?, pnl = ?, pnl_pct = ? WHERE id = ?',
+                'CLOSED', trade.exit_price, trade.exit_time, trade.pnl, trade.pnl_pct, trade.id
+            );
 
-        if (trade.mode === 'VIRTUAL') {
-            botState.balance += trade.total_cost_usd + pnl;
-            await setKeyValue('balance', botState.balance);
-        } else {
-             botState.balance += pnl;
-             await setKeyValue('balance', botState.balance);
+            // Only update memory state AFTER successful DB write
+            botState.activePositions.splice(tradeIndex, 1);
+            botState.tradeHistory.push(trade);
+
+            if (trade.mode === 'VIRTUAL') {
+                botState.balance += trade.total_cost_usd + pnl;
+                await setKeyValue('balance', botState.balance);
+            } else {
+                botState.balance += pnl;
+                await setKeyValue('balance', botState.balance);
+            }
+        } catch(dbError) {
+            log('ERROR', `CRITICAL: Failed to update database for closed trade ID ${tradeId}. State may be inconsistent. Error: ${dbError.message}`);
+            return null; // Indicate failure, do not proceed
         }
         
         const today = new Date().toISOString().split('T')[0];
@@ -1675,7 +1754,6 @@ const tradingEngine = {
         await setKeyValue('consecutiveWins', botState.consecutiveWins);
         
         await checkGlobalSafetyRules();
-        botState.tradeHistory.push(trade);
         
         if (botState.settings.LOSS_COOLDOWN_HOURS > 0) {
             const cooldownUntil = Date.now() + botState.settings.LOSS_COOLDOWN_HOURS * 60 * 60 * 1000;
@@ -1698,6 +1776,10 @@ const tradingEngine = {
             }
             try {
                 const formattedQty = formatQuantity(position.symbol, sellQty);
+                if (formattedQty <= 0) {
+                    log('ERROR', `[REAL_LIVE] Aborting partial sell for ${position.symbol}. Calculated quantity is zero or invalid.`);
+                    return;
+                }
                 log('TRADE', `[PARTIAL TP - REAL_LIVE] Attempting to SELL ${formattedQty} ${position.symbol} at MARKET.`);
                 const orderResult = await binanceApiClient.createOrder(position.symbol, 'SELL', 'MARKET', formattedQty);
                 log('BINANCE_API', `[PARTIAL TP - REAL_LIVE] Partial sell order successful for ${position.symbol}. ID: ${orderResult.orderId}`);
@@ -1733,9 +1815,11 @@ const checkGlobalSafetyRules = async () => {
     if (newStatus === 'HALTED_BTC_DROP' || newStatus === 'HALTED_DRAWDOWN') return; 
 
     const drawdownLimitUSD = (botState.dayStartBalance * (s.DAILY_DRAWDOWN_LIMIT_PCT / 100));
-    if (botState.dailyPnl < 0 && Math.abs(botState.dailyPnl) >= drawdownLimitUSD) {
+    const currentDrawdown = botState.dayStartBalance - botState.balance; // A positive value indicates a loss from day start
+    
+    if (currentDrawdown > 0 && currentDrawdown >= drawdownLimitUSD) {
         newStatus = 'HALTED_DRAWDOWN';
-        statusReason = `Daily drawdown limit of -$${drawdownLimitUSD.toFixed(2)} reached. Trading halted for the day.`;
+        statusReason = `Daily drawdown of $${currentDrawdown.toFixed(2)} reached limit of $${drawdownLimitUSD.toFixed(2)}. Trading halted for the day.`;
     } else if (botState.consecutiveLosses >= s.CONSECUTIVE_LOSS_LIMIT) {
         newStatus = 'PAUSED_LOSS_STREAK';
         statusReason = `${s.CONSECUTIVE_LOSS_LIMIT} consecutive losses reached. Trading is paused.`;
@@ -2046,7 +2130,10 @@ app.post('/api/test-connection', requireAuth, async (req, res) => {
     if (!apiKey || !secretKey) return res.status(400).json({ success: false, message: "API Key and Secret Key are required." });
     const tempApiClient = new BinanceApiClient(apiKey, secretKey, log);
     try {
-        await tempApiClient.getAccountInfo();
+        const accountInfo = await tempApiClient.getAccountInfo();
+        if (!accountInfo.permissions || !accountInfo.permissions.includes('SPOT')) {
+            return res.status(403).json({ success: false, message: 'La clé API est valide, mais les permissions pour le "SPOT Trading" sont manquantes.' });
+        }
         res.json({ success: true, message: 'Connexion à Binance et validation des clés réussies !' });
     } catch (error) {
         res.status(500).json({ success: false, message: `Échec de la connexion à Binance : ${error.message}` });
