@@ -1,4 +1,3 @@
-
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
@@ -697,18 +696,19 @@ class RealtimeAnalyzer {
 
                 const avgVolume = volumes1m.slice(-21, -1).reduce((sum, v) => sum + v, 0) / 20;
                 const volumeRatio = volumes1m[volumes1m.length - 1] / avgVolume;
-                if (volumeRatio > 1.5) score_1m += 2;
-
-                const is_ignition_signal = (volumeRatio > 1.5 && last_rsi_1m > 55 && last_macd_1m && last_macd_1m.MACD > 0);
+                if (volumeRatio > 1.5) score_1m += 1; // Refined volume score
+                if (volumeRatio > 2.0) score_1m += 1; // Bonus for exceptional volume spike
                 pair.conditions.score_1m = score_1m;
 
+                const is_ignition_signal = (volumeRatio > 1.5 && last_rsi_1m > 55 && last_macd_1m && last_macd_1m.MACD > 0);
+                
                 let tradeSettings = { ...botState.settings };
                 
-                const directTradeThreshold = is_ignition_signal ? 3 : 4;
-                const pendingThreshold = 3;
+                const threshold = is_ignition_signal ? 5 : 7;
+                const pendingThresholdMtf = is_ignition_signal ? 4 : 5;
 
                 if (tradeSettings.USE_MTF_VALIDATION === false) {
-                    if (score_1m >= directTradeThreshold) {
+                    if (score_1m >= threshold) {
                         potentialTrades.push({
                             pair,
                             score: score_1m,
@@ -719,7 +719,7 @@ class RealtimeAnalyzer {
                         });
                     }
                 } else {
-                    if (score_1m >= pendingThreshold) {
+                    if (score_1m >= pendingThresholdMtf) {
                         potentialTrades.push({
                             pair,
                             score: score_1m,
@@ -792,7 +792,7 @@ class RealtimeAnalyzer {
         const closes15m = klines15m.map(d => d.close);
         const highs15m = klines15m.map(d => d.high);
         const lows15m = klines15m.map(d => d.low);
-        const volumes15m = klines15m.map(k => k.volume);
+        const volumes15m = klines15m.map(d => d.volume);
         const lastClose15m = closes15m[closes15m.length - 1];
 
         // --- Calculate all 15m indicators for display ---
@@ -1200,6 +1200,7 @@ let botState = {
     consecutiveWins: 0,
     currentTradingDay: new Date().toISOString().split('T')[0],
     fearAndGreed: null,
+    btcRegimeCache: null, // For CPU optimization
 };
 
 const scanner = new ScannerService(log, KLINE_DATA_DIR);
@@ -1312,7 +1313,7 @@ const tradingEngine = {
             const atr1m = fastAtr(highs1m, lows1m, closes1m, 7).pop();
             if (highs1m.length > 0) {
                 const lastRange = highs1m[highs1m.length - 1] - lows1m[lows1m.length - 1];
-                const rangeOk = !atr1m || lastRange >= atr1m * 0.7;
+                const rangeOk = !atr1m || lastRange >= atr1m * 0.5;
                 if (!rangeOk && !isIgnition && !superBull) {
                     log('TRADE', `[RANGE] ${pair.symbol} 1 m range too tight – skipped.`);
                     return false;
@@ -1333,27 +1334,37 @@ const tradingEngine = {
             }
 
             // 3. Spread kill-switch
+            let spread = 0;
             const ticker = await binanceApiClient.getOrderBookTicker(pair.symbol);
             if (ticker && ticker.bidPrice && ticker.askPrice) {
-                const spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
-                const spreadMax = isIgnition || superBull ? 1.5 : 0.8;
+                spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
+                const spreadMax = isIgnition || superBull ? 2.0 : 0.8;
                 if (spread > spreadMax) {
                   log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > ${spreadMax} % – skipped.`);
                   return false;
                 }
             }
     
-            // 4. BTC 4 h regime
-            const btc4h = realtimeAnalyzer.klineData.get('BTCUSDT')?.get('4h');
-            if (btc4h && btc4h.length > 200) {
-                const btcClose = btc4h.map(k => k.close);
-                const ema50 = EMA.calculate({ period: 50, values: btcClose }).pop();
-                const ema200 = EMA.calculate({ period: 200, values: btcClose }).pop();
-                const btcOk = ema50 >= ema200;
-                if (!btcOk && !isIgnition && !superBull) {
-                    log('TRADE', `[BTC-REGIME] BTC 4 h EMA50 < EMA200 – no new longs.`);
-                    return false;
+            // 4. BTC 4 h regime (with caching for performance)
+            let btcOk = true;
+            const now = Date.now();
+            const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+            if (!botState.btcRegimeCache || now - botState.btcRegimeCache.timestamp > CACHE_DURATION) {
+                const btc4h = realtimeAnalyzer.klineData.get('BTCUSDT')?.get('4h');
+                if (btc4h && btc4h.length > 200) {
+                    const btcClose = btc4h.map(k => k.close);
+                    const ema50 = EMA.calculate({ period: 50, values: btcClose }).pop();
+                    const ema200 = EMA.calculate({ period: 200, values: btcClose }).pop();
+                    botState.btcRegimeCache = { ema50, ema200, timestamp: now };
+                    log('INFO', `[BTC-REGIME] Cache refreshed. EMA50: ${ema50.toFixed(2)}, EMA200: ${ema200.toFixed(2)}.`);
                 }
+            }
+            if (botState.btcRegimeCache) {
+                btcOk = botState.btcRegimeCache.ema50 >= botState.btcRegimeCache.ema200;
+            }
+            if (!btcOk && !isIgnition && !superBull) {
+                log('TRADE', `[BTC-REGIME] BTC 4h EMA50 < EMA200 – no new longs.`);
+                return false;
             }
 
             // 5. Funding-rate filter
@@ -1370,7 +1381,7 @@ const tradingEngine = {
             // --- Liquidity Filter (Relaxed for Ignition) ---
             if (tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
                 try {
-                    const requiredLiquidity = isIgnition ? 80000 : tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD;
+                    const requiredLiquidity = isIgnition ? 60000 : tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD;
                     const depth = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair.symbol}&limit=100`).then(res => res.json());
                     const price = pair.price;
                     const range = 0.005; // +/- 0.5%
@@ -1471,9 +1482,12 @@ const tradingEngine = {
             // --- TAIL-RISK SIZING ---
             let tailMultiplier = 1.0;
             if (superBull) {
-                tailMultiplier = 1.2; // Super-bull takes precedence
+                tailMultiplier = 1.2;
             } else if (isIgnition) {
-                tailMultiplier = 0.75; // Standard ignition
+                tailMultiplier = 0.75;
+            }
+            if (spread > 2.0) {
+                tailMultiplier *= 0.5; // Halve size for extreme spread
             }
             if (tailMultiplier !== 1.0) {
                 log('TRADE', `[TAIL-RISK SIZING] Applying multiplier ${tailMultiplier.toFixed(2)}x to position size for ${pair.symbol}.`);
@@ -1481,6 +1495,13 @@ const tradingEngine = {
             }
     
             const target_quantity = positionSizeUSD / entryPrice;
+            const rules = symbolRules.get(pair.symbol);
+            const minNotionalValue = rules ? rules.minNotional : 5.0;
+
+            if (positionSizeUSD < minNotionalValue) {
+                log('ERROR', `[MIN_NOTIONAL] Final size $${positionSizeUSD.toFixed(2)} is less than exchange minimum $${minNotionalValue} after tail multiplier. Trade aborted.`);
+                return false;
+            }
     
             const scalingInPercents = (tradeSettings.SCALING_IN_CONFIG || "").split(',').map(p => parseFloat(p.trim())).filter(p => !isNaN(p) && p > 0);
             let useScalingIn = !isIgnition && scalingInPercents.length > 0;
@@ -1499,9 +1520,6 @@ const tradingEngine = {
                 initial_quantity *= reductionFactor;
                 log('WARN', `[RISK MGMT] ${botState.consecutiveLosses} consecutive losses. Reducing initial position size by ${(1-reductionFactor)*100}% for ${pair.symbol}.`);
             }
-    
-            const rules = symbolRules.get(pair.symbol);
-            const minNotionalValue = rules ? rules.minNotional : 5.0; // Use a safe default of 5 USDT
     
             // --- MIN_NOTIONAL CHECK & ADJUSTMENT ---
             if (botState.tradingMode === 'REAL_LIVE' && initial_cost < minNotionalValue) {
