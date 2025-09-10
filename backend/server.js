@@ -140,6 +140,16 @@ class BinanceApiClient {
         return crypto.createHmac('sha256', this.secretKey).update(queryString).digest('hex');
     }
 
+    async getOrderBookTicker(symbol) {
+        try {
+          const r = await fetch(`${this.baseUrl}/api/v3/ticker/bookTicker?symbol=${symbol}`);
+          return await r.json();
+        } catch (e) {
+          this.log('ERROR', `getOrderBookTicker ${symbol} : ${e.message}`);
+          return null;
+        }
+    }
+
     async _request(method, endpoint, params = {}) {
         const timestamp = Date.now();
         const queryString = new URLSearchParams({ ...params, timestamp }).toString();
@@ -188,6 +198,18 @@ let binanceApiClient = null;
 let symbolRules = new Map();
 let lastExchangeInfoFetch = 0;
 
+/* ---------- ATR reactive (période 7) ---------- */
+const fastAtr = (high, low, close, period = 7) => {
+  const tr = [];
+  for (let i = 1; i < close.length; i++) {
+    const h = high[i], l = low[i], cPrev = close[i - 1];
+    tr.push(Math.max(h - l, Math.abs(h - cPrev), Math.abs(l - cPrev)));
+  }
+  const atr = [tr[0]];
+  for (let i = 1; i < tr.length; i++) atr.push((atr[i - 1] * (period - 1) + tr[i]) / period);
+  return atr;
+};
+
 const initExchangeInfo = async () => {
   const now = Date.now();
   if (now - lastExchangeInfoFetch < 30 * 60 * 1000) return; // 30 min cache
@@ -234,6 +256,16 @@ function formatQuantity(symbol, quantity) {
 function isValidQuantity(q) {
   return typeof q === 'number' && isFinite(q) && q > 0;
 }
+
+/* ---------- history sizes per TF ---------- */
+const KLINE_HISTORY_LIMITS = {
+  '1m': 1000,   // ≈ 16.7 h
+  '5m': 500,    // ≈ 41.7 h
+  '15m': 400,   // ≈ 100 h
+  '1h': 300,    // ≈ 12.5 j
+  '4h': 200,    // ≈ 33 j
+  '1d': 100     // ≈ 100 j
+};
 
 
 // --- Persistence ---
@@ -293,6 +325,11 @@ const initDb = async () => {
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS ws_price_cache (
+                symbol TEXT PRIMARY KEY,
+                price REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            )
         `);
         log('INFO', 'SQLite database schema checked/created.');
     } catch (err) {
@@ -303,6 +340,19 @@ const initDb = async () => {
 
 const getKeyValue = async (key) => (await db.get('SELECT value FROM key_value_store WHERE key = ?', key))?.value;
 const setKeyValue = async (key, value) => await db.run('INSERT OR REPLACE INTO key_value_store (key, value) VALUES (?, ?)', key, value);
+
+/* ---------- WS price cache helpers ---------- */
+const cacheWsPrice = async (symbol, price) => {
+  const now = new Date().toISOString();
+  await db.run(
+    'INSERT OR REPLACE INTO ws_price_cache (symbol, price, updated_at) VALUES (?, ?, ?)',
+    symbol, price, now
+  );
+};
+const loadWsPriceCache = async () => {
+  const rows = await db.all('SELECT symbol, price FROM ws_price_cache');
+  rows.forEach(r => botState.priceCache.set(r.symbol, { price: r.price }));
+};
 
 const saveHotlistToDb = async () => {
     await setKeyValue('hotlist', JSON.stringify(Array.from(botState.hotlist)));
@@ -536,6 +586,9 @@ const loadData = async () => {
         await fs.writeFile(AUTH_FILE_PATH, JSON.stringify({ passwordHash: botState.passwordHash }, null, 2));
     }
     
+    // 6. Warm WS price cache
+    await loadWsPriceCache();
+    log('INFO', 'In-memory price cache warmed.');
     realtimeAnalyzer.updateSettings(botState.settings);
 };
 
@@ -589,6 +642,11 @@ class RealtimeAnalyzer {
         this.microTriggerQueue = new Set();
         this.isProcessingQueue = false;
         this.queueTimeout = null;
+        // load 4 h & 1 h for regime & OBV
+        if (!this.klineData.has('BTCUSDT')) this.klineData.set('BTCUSDT', new Map());
+        ['1h', '4h'].forEach(tf => {
+          if (!this.klineData.get('BTCUSDT').has(tf)) this.hydrateSymbol('BTCUSDT', tf);
+        });
     }
 
     updateSettings(newSettings) {
@@ -875,7 +933,7 @@ class RealtimeAnalyzer {
 
 
     async hydrateSymbol(symbol, interval = '15m') {
-        const klineLimit = interval === '1m' ? 100 : (interval === '5m' ? 50 : 201);
+        const klineLimit = KLINE_HISTORY_LIMITS[interval] || 201;
         if (this.hydrating.has(`${symbol}-${interval}`)) return;
         this.hydrating.add(`${symbol}-${interval}`);
         this.log('INFO', `[Analyzer] Hydrating ${interval} klines for: ${symbol}`);
@@ -913,7 +971,7 @@ class RealtimeAnalyzer {
 
         const klines = this.klineData.get(symbol).get(interval);
         klines.push(kline);
-        if (klines.length > 1000) klines.shift(); // Increased buffer as requested
+        if (klines.length > KLINE_HISTORY_LIMITS[interval]) klines.shift(); // enforce limit
         
         if (interval === '15m') {
             this.analyze15mIndicators(symbol);
@@ -967,7 +1025,7 @@ function connectToBinanceStreams() {
         }
     });
 
-    binanceWs.on('message', (data) => {
+    binanceWs.on('message', async (data) => {
         try {
             const msg = JSON.parse(data);
             if (msg.e === 'kline') {
@@ -1002,6 +1060,8 @@ function connectToBinanceStreams() {
 
                 // 3. Also broadcast the simple PRICE_UPDATE for other parts of the app that only care about price (like PnL calculation).
                 broadcast({ type: 'PRICE_UPDATE', payload: {symbol: symbol, price: newPrice } });
+                // 4. Persist last price in DB
+                await cacheWsPrice(symbol, newPrice);
             }
         } catch (e) {
             log('ERROR', `Error processing Binance WS message: ${e.message}`);
@@ -1252,6 +1312,15 @@ let tradeProcessingLock = false;
 
 // --- Trading Engine ---
 const tradingEngine = {
+    /* ---------- progressive partial TP ---------- */
+    async executeSecondPartial(position, currentPrice, settings) {
+        if (position.secondPartialDone) return;
+        const pnlPct = ((currentPrice - position.average_entry_price) / position.average_entry_price) * 100;
+        if (pnlPct >= settings.RISK_REWARD_RATIO * 100) {
+          await this.executePartialSell(position, currentPrice, { PARTIAL_TP_SELL_QTY_PCT: 50 });
+          position.secondPartialDone = true;
+        }
+    },
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
         if (tradeProcessingLock) {
             // This check is now a secondary safeguard; the primary control is the sequential queue.
@@ -1273,7 +1342,67 @@ const tradingEngine = {
             }
             
             const isIgnition = pair.strategy_type === 'IGNITION';
+
+            /* --- NEW FILTERS --- */
+            const klines1m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1m') || [];
+            const highs1m = klines1m.map(k => k.high);
+            const lows1m = klines1m.map(k => k.low);
+            const closes1m = klines1m.map(k => k.close);
+            
+            // 1. Range expansion 1 m
+            const atr1m = fastAtr(highs1m, lows1m, closes1m, 7).pop();
+            if (highs1m.length > 0) {
+                const lastRange = highs1m[highs1m.length - 1] - lows1m[lows1m.length - 1];
+                if (atr1m && lastRange < atr1m * 1.2) {
+                    log('TRADE', `[RANGE] ${pair.symbol} 1 m range too tight – skipped.`);
+                    return false;
+                }
+            }
+
+            // 2. OBV 1 h trend
+            const obv1h_klines = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1h') || [];
+            const obv1h_data_for_calc = obv1h_klines.map(k => ({ close: k.close, volume: k.volume, open: k.open }));
+            const obv1h = calculateOBV(obv1h_data_for_calc);
+            if (obv1h.length > 20) {
+                const obvEma20 = EMA.calculate({ period: 20, values: obv1h }).pop();
+                if (obv1h.length && obv1h[obv1h.length - 1] < obvEma20) {
+                    log('TRADE', `[OBV] ${pair.symbol} OBV 1 h below EMA – skipped.`);
+                    return false;
+                }
+            }
+
+            // 3. Spread kill-switch
+            const ticker = await binanceApiClient.getOrderBookTicker(pair.symbol);
+            if (ticker && ticker.bidPrice && ticker.askPrice) {
+                const spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
+                if (spread > 0.8) {
+                  log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > 0.8 % – skipped.`);
+                  return false;
+                }
+            }
     
+            // 4. BTC 4 h regime
+            const btc4h = realtimeAnalyzer.klineData.get('BTCUSDT')?.get('4h');
+            if (btc4h && btc4h.length > 200) {
+                const btcClose = btc4h.map(k => k.close);
+                const ema50 = EMA.calculate({ period: 50, values: btcClose }).pop();
+                const ema200 = EMA.calculate({ period: 200, values: btcClose }).pop();
+                if (ema50 < ema200) {
+                    log('TRADE', `[BTC-REGIME] BTC 4 h EMA50 < EMA200 – no new longs.`);
+                    return false;
+                }
+            }
+
+            // 5. Funding-rate filter (spot vs perp) - NOTE: This will likely not work as spot tickers don't have funding rates.
+            try {
+                const perpTicker = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${pair.symbol}`).then(res => res.json());
+                if (perpTicker && perpTicker.lastFundingRate && parseFloat(perpTicker.lastFundingRate) > 0.0005) { // 0.05%
+                    log('TRADE', `[FUNDING] ${pair.symbol} funding > 0.05% – skipped.`);
+                    return false;
+                }
+            } catch (e) { /* ignore if fails, not critical */ }
+
+
             // --- Liquidity Filter (Bypassed for Ignition) ---
             if (!isIgnition && tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
                 try {
@@ -1331,7 +1460,6 @@ const tradingEngine = {
     
             // --- Parabolic Filter Check (Bypassed for Ignition) ---
             if (!isIgnition && tradeSettings.USE_PARABOLIC_FILTER) {
-                const klines1m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1m');
                 if (klines1m && klines1m.length >= tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES) {
                     const checkPeriodKlines = klines1m.slice(-tradeSettings.PARABOLIC_FILTER_PERIOD_MINUTES);
                     const startingPrice = checkPeriodKlines[0].open;
@@ -1386,6 +1514,14 @@ const tradingEngine = {
             
             let initial_quantity = useScalingIn ? (target_quantity * (scalingInPercents[0] / 100)) : target_quantity;
             let initial_cost = initial_quantity * entryPrice;
+
+            // Dynamic size on loss-streak
+            if (botState.consecutiveLosses > 0) {
+                const reductionFactor = Math.pow(0.75, botState.consecutiveLosses);
+                initial_cost *= reductionFactor;
+                initial_quantity *= reductionFactor;
+                log('WARN', `[RISK MGMT] ${botState.consecutiveLosses} consecutive losses. Reducing initial position size by ${(1-reductionFactor)*100}% for ${pair.symbol}.`);
+            }
     
             const rules = symbolRules.get(pair.symbol);
             const minNotionalValue = rules ? rules.minNotional : 5.0; // Use a safe default of 5 USDT
@@ -1452,7 +1588,13 @@ const tradingEngine = {
             if (isIgnition) {
                 stopLoss = slPriceReference;
             } else if (tradeSettings.USE_ATR_STOP_LOSS && pair.atr_15m) {
-                stopLoss = entryPrice - (pair.atr_15m * tradeSettings.ATR_MULTIPLIER);
+                 // ATR 7 for tighter SL
+                const klines15m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('15m') || [];
+                const highs15m = klines15m.map(k => k.high);
+                const lows15m = klines15m.map(k => k.low);
+                const closes15m = klines15m.map(k => k.close);
+                const reactiveAtr = fastAtr(highs15m, lows15m, closes15m, 7).pop();
+                stopLoss = entryPrice - (reactiveAtr * tradeSettings.ATR_MULTIPLIER);
             } else {
                 stopLoss = entryPrice * (1 - (tradeSettings.STOP_LOSS_PCT / 100));
             }
@@ -1486,6 +1628,7 @@ const tradingEngine = {
                 partial_tp_hit: false,
                 realized_pnl: 0,
                 trailing_stop_tightened: false,
+                secondPartialDone: false,
                 is_scaling_in: useScalingIn && scalingInPercents.length > 1,
                 current_entry_count: 1,
                 total_entries: useScalingIn ? scalingInPercents.length : 1,
@@ -1716,6 +1859,11 @@ const tradingEngine = {
                 continue;
             }
 
+            // Second partial TP
+            if (s.USE_PARTIAL_TAKE_PROFIT && pos.partial_tp_hit && !pos.secondPartialDone) {
+                await this.executeSecondPartial(pos, currentPrice, s);
+            }
+
             if (Object.keys(changes).length > 0) {
                 const setClauses = Object.keys(changes).map(k => `${k} = ?`).join(', ');
                 await db.run(`UPDATE trades SET ${setClauses} WHERE id = ?`, [...Object.values(changes), pos.id]);
@@ -1773,6 +1921,14 @@ const tradingEngine = {
 
         trade.pnl = pnl;
         trade.pnl_pct = initialFullPositionValue > 0 ? (pnl / initialFullPositionValue) * 100 : 0;
+        
+        // Cool-down dynamic
+        if (botState.settings.LOSS_COOLDOWN_HOURS > 0 && pnl < 0) {
+            const cooldownHours = botState.settings.LOSS_COOLDOWN_HOURS * (1 + Math.abs(trade.pnl_pct) / 2);
+            const cooldownUntil = Date.now() + cooldownHours * 60 * 60 * 1000;
+            botState.recentlyLostSymbols.set(trade.symbol, { until: cooldownUntil });
+            log('TRADE', `[${trade.symbol}] dynamic cooldown ${cooldownHours.toFixed(1)} h`);
+        }
 
         try {
             await db.run(
