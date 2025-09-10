@@ -208,6 +208,11 @@ function formatQuantity(symbol, quantity) {
     return Math.floor(quantity * factor) / factor;
 }
 
+/* ---------- safety guard ---------- */
+function isValidQuantity(q) {
+  return typeof q === 'number' && isFinite(q) && q > 0;
+}
+
 
 // --- Persistence ---
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -1314,6 +1319,10 @@ const tradingEngine = {
     
             const scalingInPercents = (tradeSettings.SCALING_IN_CONFIG || "").split(',').map(p => parseFloat(p.trim())).filter(p => !isNaN(p) && p > 0);
             let useScalingIn = !isIgnition && scalingInPercents.length > 0;
+            if (useScalingIn && scalingInPercents.length === 0) {
+              log('TRADE', `[SCALING] Invalid SCALING_IN_CONFIG – disabling scaling-in for ${pair.symbol}`);
+              useScalingIn = false;
+            }
             
             let initial_quantity = useScalingIn ? (target_quantity * (scalingInPercents[0] / 100)) : target_quantity;
             let initial_cost = initial_quantity * entryPrice;
@@ -1324,6 +1333,10 @@ const tradingEngine = {
             // --- MIN_NOTIONAL CHECK & ADJUSTMENT ---
             if (botState.tradingMode === 'REAL_LIVE' && initial_cost < minNotionalValue) {
                 log('WARN', `[MIN_NOTIONAL] Initial order size for ${pair.symbol} ($${initial_cost.toFixed(2)}) is below minimum ($${minNotionalValue}). Adjusting...`);
+                if (!isValidQuantity(initial_quantity)) {
+                  log('ERROR', `[MIN_NOTIONAL] Aborted trade for ${pair.symbol} – quantity invalid.`);
+                  return false;
+                }
                 
                 const fullPositionCost = target_quantity * entryPrice;
     
@@ -1338,6 +1351,11 @@ const tradingEngine = {
                 useScalingIn = false; // Override for this trade
             }
             
+            if (!isValidQuantity(initial_quantity)) {
+              log('ERROR', `[TRADE] Aborted – invalid quantity for ${pair.symbol}: ${initial_quantity}`);
+              return false;
+            }
+
             // --- REAL TRADE EXECUTION ---
             if (botState.tradingMode === 'REAL_LIVE') {
                 if (!binanceApiClient) {
@@ -1562,11 +1580,11 @@ const tradingEngine = {
             }
 
             let currentR = 0;
-            if (pos.initial_stop_loss) {
-                const initialRiskPerUnit = pos.average_entry_price - pos.initial_stop_loss;
-                if (initialRiskPerUnit > 0) {
-                    currentR = (currentPrice - pos.average_entry_price) / initialRiskPerUnit;
-                }
+            const initialRiskPerUnit = pos.average_entry_price - pos.initial_stop_loss;
+            if (initialRiskPerUnit <= 0) {
+                log('WARN', `[POSITION] Invalid initial risk for ${pos.symbol} – skipping R-based logic.`);
+            } else {
+                currentR = (currentPrice - pos.average_entry_price) / initialRiskPerUnit;
             }
             
             const pnlPct = ((currentPrice - pos.average_entry_price) / pos.average_entry_price) * 100;
@@ -1619,9 +1637,11 @@ const tradingEngine = {
                     }
 
                     const newTrailingSL = pos.highest_price_since_entry - (pos.entry_snapshot.atr_15m * atrMultiplier);
-                    if (newTrailingSL > pos.stop_loss) {
+                    if (newTrailingSL > pos.stop_loss && newTrailingSL < currentPrice) {
                         pos.stop_loss = newTrailingSL;
                         changes.stop_loss = newTrailingSL;
+                    } else {
+                        log('DEBUG', `[TRAILING] Skipped SL update for ${pos.symbol} – would cross price or be negative.`);
                     }
                 }
             }
@@ -1815,11 +1835,10 @@ const checkGlobalSafetyRules = async () => {
     if (newStatus === 'HALTED_BTC_DROP' || newStatus === 'HALTED_DRAWDOWN') return; 
 
     const drawdownLimitUSD = (botState.dayStartBalance * (s.DAILY_DRAWDOWN_LIMIT_PCT / 100));
-    const currentDrawdown = botState.dayStartBalance - botState.balance; // A positive value indicates a loss from day start
     
-    if (currentDrawdown > 0 && currentDrawdown >= drawdownLimitUSD) {
+    if (botState.dailyPnl < 0 && (-botState.dailyPnl) >= drawdownLimitUSD) {
         newStatus = 'HALTED_DRAWDOWN';
-        statusReason = `Daily drawdown of $${currentDrawdown.toFixed(2)} reached limit of $${drawdownLimitUSD.toFixed(2)}. Trading halted for the day.`;
+        statusReason = `Daily drawdown limit of -$${drawdownLimitUSD.toFixed(2)} reached. Trading halted for the day.`;
     } else if (botState.consecutiveLosses >= s.CONSECUTIVE_LOSS_LIMIT) {
         newStatus = 'PAUSED_LOSS_STREAK';
         statusReason = `${s.CONSECUTIVE_LOSS_LIMIT} consecutive losses reached. Trading is paused.`;
