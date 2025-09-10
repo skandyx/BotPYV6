@@ -318,7 +318,8 @@ const initDb = async () => {
                 total_entries INTEGER DEFAULT 1,
                 strategy_type TEXT,
                 entry_snapshot TEXT,
-                management_settings TEXT
+                management_settings TEXT,
+                secondPartialDone INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS key_value_store (
@@ -391,6 +392,7 @@ const parseDbTrade = (dbRow) => {
         partial_tp_hit: !!dbRow.partial_tp_hit,
         trailing_stop_tightened: !!dbRow.trailing_stop_tightened,
         is_scaling_in: !!dbRow.is_scaling_in,
+        secondPartialDone: !!dbRow.secondPartialDone,
         entry_snapshot: entrySnapshot,
         management_settings: managementSettings,
     };
@@ -398,7 +400,7 @@ const parseDbTrade = (dbRow) => {
 
 const prepareTradeForDb = (trade) => {
     const dbTrade = { ...trade };
-    for (const key of ['is_at_breakeven', 'partial_tp_hit', 'trailing_stop_tightened', 'is_scaling_in']) {
+    for (const key of ['is_at_breakeven', 'partial_tp_hit', 'trailing_stop_tightened', 'is_scaling_in', 'secondPartialDone']) {
         dbTrade[key] = dbTrade[key] ? 1 : 0;
     }
     for (const key of ['entry_snapshot', 'management_settings']) {
@@ -1319,6 +1321,7 @@ const tradingEngine = {
         if (pnlPct >= settings.RISK_REWARD_RATIO * 100) {
           await this.executePartialSell(position, currentPrice, { PARTIAL_TP_SELL_QTY_PCT: 50 });
           position.secondPartialDone = true;
+          await db.run('UPDATE trades SET secondPartialDone = 1 WHERE id = ?', position.id);
         }
     },
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
@@ -1342,6 +1345,7 @@ const tradingEngine = {
             }
             
             const isIgnition = pair.strategy_type === 'IGNITION';
+            const superBull = pair.conditions.hotlist_score >= 10;
 
             /* --- NEW FILTERS --- */
             const klines1m = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1m') || [];
@@ -1353,7 +1357,8 @@ const tradingEngine = {
             const atr1m = fastAtr(highs1m, lows1m, closes1m, 7).pop();
             if (highs1m.length > 0) {
                 const lastRange = highs1m[highs1m.length - 1] - lows1m[lows1m.length - 1];
-                if (atr1m && lastRange < atr1m * 1.2) {
+                const rangeOk = !atr1m || lastRange >= atr1m * 1.2;
+                if (!rangeOk && !isIgnition) {
                     log('TRADE', `[RANGE] ${pair.symbol} 1 m range too tight – skipped.`);
                     return false;
                 }
@@ -1363,9 +1368,11 @@ const tradingEngine = {
             const obv1h_klines = realtimeAnalyzer.klineData.get(pair.symbol)?.get('1h') || [];
             const obv1h_data_for_calc = obv1h_klines.map(k => ({ close: k.close, volume: k.volume, open: k.open }));
             const obv1h = calculateOBV(obv1h_data_for_calc);
+            let obvOk = true;
             if (obv1h.length > 20) {
                 const obvEma20 = EMA.calculate({ period: 20, values: obv1h }).pop();
-                if (obv1h.length && obv1h[obv1h.length - 1] < obvEma20) {
+                obvOk = !obvEma20 || (obv1h.length && obv1h[obv1h.length - 1] >= obvEma20);
+                if (!obvOk && !isIgnition) {
                     log('TRADE', `[OBV] ${pair.symbol} OBV 1 h below EMA – skipped.`);
                     return false;
                 }
@@ -1373,9 +1380,11 @@ const tradingEngine = {
 
             // 3. Spread kill-switch
             const ticker = await binanceApiClient.getOrderBookTicker(pair.symbol);
+            let spreadOk = true;
             if (ticker && ticker.bidPrice && ticker.askPrice) {
                 const spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
-                if (spread > 0.8) {
+                spreadOk = spread <= 0.8;
+                if (!spreadOk && !isIgnition && !superBull) {
                   log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > 0.8 % – skipped.`);
                   return false;
                 }
@@ -1387,20 +1396,22 @@ const tradingEngine = {
                 const btcClose = btc4h.map(k => k.close);
                 const ema50 = EMA.calculate({ period: 50, values: btcClose }).pop();
                 const ema200 = EMA.calculate({ period: 200, values: btcClose }).pop();
-                if (ema50 < ema200) {
+                const btcOk = ema50 >= ema200;
+                if (!btcOk && !isIgnition && !superBull) {
                     log('TRADE', `[BTC-REGIME] BTC 4 h EMA50 < EMA200 – no new longs.`);
                     return false;
                 }
             }
 
-            // 5. Funding-rate filter (spot vs perp) - NOTE: This will likely not work as spot tickers don't have funding rates.
+            // 5. Funding-rate filter
             try {
                 const perpTicker = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${pair.symbol}`).then(res => res.json());
-                if (perpTicker && perpTicker.lastFundingRate && parseFloat(perpTicker.lastFundingRate) > 0.0005) { // 0.05%
+                const fundOk = !(perpTicker && perpTicker.lastFundingRate && parseFloat(perpTicker.lastFundingRate) > 0.0005);
+                if (!fundOk && !isIgnition) {
                     log('TRADE', `[FUNDING] ${pair.symbol} funding > 0.05% – skipped.`);
                     return false;
                 }
-            } catch (e) { /* ignore if fails, not critical */ }
+            } catch (e) { /* ignore */ }
 
 
             // --- Liquidity Filter (Bypassed for Ignition) ---
@@ -1501,6 +1512,21 @@ const tradingEngine = {
             if (botState.circuitBreakerStatus === 'WARNING_BTC_DROP') {
                 positionSizeUSD /= 2;
                 log('WARN', `[CIRCUIT BREAKER] WARNING ACTIVE. Reducing position size for ${pair.symbol} to $${positionSizeUSD.toFixed(2)}.`);
+            }
+
+            // --- TAIL-RISK SIZING ---
+            let tailMultiplier = 1.0;
+            if (isIgnition) {
+                tailMultiplier = 0.75; // smaller size for high-risk ignition
+            } else if (superBull) {
+                tailMultiplier = 1.2; // bigger size for super high conviction
+            }
+            if (!spreadOk) { // spreadOk was calculated in filters
+                tailMultiplier *= 0.6; // reduce size further if spread is wide
+            }
+            if (tailMultiplier !== 1.0) {
+                log('TRADE', `[TAIL-RISK SIZING] Applying multiplier ${tailMultiplier.toFixed(2)}x to position size for ${pair.symbol}.`);
+                positionSizeUSD *= tailMultiplier;
             }
     
             const target_quantity = positionSizeUSD / entryPrice;
