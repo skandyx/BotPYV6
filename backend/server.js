@@ -186,6 +186,28 @@ class BinanceApiClient {
 }
 let binanceApiClient = null;
 let symbolRules = new Map();
+let lastExchangeInfoFetch = 0;
+
+const initExchangeInfo = async () => {
+  const now = Date.now();
+  if (now - lastExchangeInfoFetch < 30 * 60 * 1000) return; // 30 min cache
+  try {
+    const exchangeInfo = await binanceApiClient.getExchangeInfo();
+    exchangeInfo.symbols.forEach(s => {
+        const lotSizeFilter = s.filters.find(f => f.filterType === 'LOT_SIZE');
+        const minNotionalFilter = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
+        symbolRules.set(s.symbol, {
+            stepSize: lotSizeFilter ? parseFloat(lotSizeFilter.stepSize) : 1,
+            minNotional: minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5.0
+        });
+    });
+    log('INFO', `Cached trading rules for ${symbolRules.size} symbols.`);
+    lastExchangeInfoFetch = now;
+  } catch (e) {
+    log('ERROR', 'Failed to fetch exchange info (will retry in 30 min).');
+  }
+};
+
 
 function formatQuantity(symbol, quantity) {
     if (typeof quantity !== 'number' || !isFinite(quantity) || quantity <= 0) {
@@ -1197,6 +1219,8 @@ let tradeProcessingLock = false;
 // --- Trading Engine ---
 const tradingEngine = {
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
+        // ensure rules are fresh before real order
+        if (botState.tradingMode === 'REAL_LIVE') await initExchangeInfo();
         if (tradeProcessingLock) {
             log('TRADE', `[QUEUE] Another trade is being processed. Skipping ${pair.symbol} for now.`);
             return false;
@@ -1893,6 +1917,8 @@ const checkGlobalSafetyRules = async () => {
     }
 };
 
+let lastFngLog = 0;
+let fngNullStart = null;
 const fetchFearAndGreedIndex = async () => {
     try {
         const response = await fetch('https://api.alternative.me/fng/?limit=1');
@@ -1903,10 +1929,19 @@ const fetchFearAndGreedIndex = async () => {
             const fngData = { value: parseInt(fng.value, 10), classification: fng.value_classification };
             botState.fearAndGreed = fngData;
             broadcast({ type: 'FEAR_AND_GREED_UPDATE', payload: fngData });
+            fngNullStart = null;
             await checkGlobalSafetyRules();
         }
     } catch (error) {
         log('ERROR', `Failed to fetch Fear & Greed Index: ${error.message}`);
+        if (!botState.fearAndGreed) {
+          const now = Date.now();
+          if (!fngNullStart) fngNullStart = now;
+          if (now - fngNullStart > 60 * 60 * 1000 && now - lastFngLog > 60 * 60 * 1000) {
+            log('WARN', 'Fear & Greed Index unavailable for more than 1h – sentiment filter disabled.');
+            lastFngLog = now;
+          }
+        }
     }
 };
 
@@ -1916,20 +1951,7 @@ const startBot = async () => {
     
     if (botState.settings.BINANCE_API_KEY && botState.settings.BINANCE_SECRET_KEY) {
         binanceApiClient = new BinanceApiClient(botState.settings.BINANCE_API_KEY, botState.settings.BINANCE_SECRET_KEY, log);
-        try {
-            const exchangeInfo = await binanceApiClient.getExchangeInfo();
-            exchangeInfo.symbols.forEach(s => {
-                const lotSizeFilter = s.filters.find(f => f.filterType === 'LOT_SIZE');
-                const minNotionalFilter = s.filters.find(f => f.filterType === 'MIN_NOTIONAL');
-                symbolRules.set(s.symbol, {
-                    stepSize: lotSizeFilter ? parseFloat(lotSizeFilter.stepSize) : 1,
-                    minNotional: minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5.0
-                });
-            });
-            log('INFO', `Cached trading rules for ${symbolRules.size} symbols.`);
-        } catch (e) {
-            log('ERROR', 'Failed to initialize Binance API client with exchange info. Real trading will fail.');
-        }
+        await initExchangeInfo();
     }
 
     runScannerCycle(); 
