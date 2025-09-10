@@ -1279,16 +1279,6 @@ let tradeProcessingLock = false;
 
 // --- Trading Engine ---
 const tradingEngine = {
-    /* ---------- progressive partial TP ---------- */
-    async executeSecondPartial(position, currentPrice, settings) {
-        if (position.secondPartialDone) return;
-        const pnlPct = ((currentPrice - position.average_entry_price) / position.average_entry_price) * 100;
-        if (pnlPct >= settings.RISK_REWARD_RATIO * 100) {
-          await this.executePartialSell(position, currentPrice, { PARTIAL_TP_SELL_QTY_PCT: 50 });
-          position.secondPartialDone = true;
-          await db.run('UPDATE trades SET secondPartialDone = 1 WHERE id = ?', position.id);
-        }
-    },
     async evaluateAndOpenTrade(pair, slPriceReference, tradeSettings) {
         if (tradeProcessingLock) {
             // This check is now a secondary safeguard; the primary control is the sequential queue.
@@ -1322,7 +1312,7 @@ const tradingEngine = {
             const atr1m = fastAtr(highs1m, lows1m, closes1m, 7).pop();
             if (highs1m.length > 0) {
                 const lastRange = highs1m[highs1m.length - 1] - lows1m[lows1m.length - 1];
-                const rangeOk = !atr1m || lastRange >= atr1m * 0.9;
+                const rangeOk = !atr1m || lastRange >= atr1m * 0.7;
                 if (!rangeOk && !isIgnition && !superBull) {
                     log('TRADE', `[RANGE] ${pair.symbol} 1 m range too tight – skipped.`);
                     return false;
@@ -1346,7 +1336,7 @@ const tradingEngine = {
             const ticker = await binanceApiClient.getOrderBookTicker(pair.symbol);
             if (ticker && ticker.bidPrice && ticker.askPrice) {
                 const spread = Math.abs(parseFloat(ticker.askPrice) - parseFloat(ticker.bidPrice)) / parseFloat(ticker.bidPrice) * 100;
-                const spreadMax = isIgnition || superBull ? 1.2 : 0.8;
+                const spreadMax = isIgnition || superBull ? 1.5 : 0.8;
                 if (spread > spreadMax) {
                   log('TRADE', `[SPREAD] ${pair.symbol} spread ${spread.toFixed(2)} % > ${spreadMax} % – skipped.`);
                   return false;
@@ -1380,7 +1370,7 @@ const tradingEngine = {
             // --- Liquidity Filter (Relaxed for Ignition) ---
             if (tradeSettings.USE_ORDER_BOOK_LIQUIDITY_FILTER) {
                 try {
-                    const requiredLiquidity = isIgnition ? 120000 : tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD;
+                    const requiredLiquidity = isIgnition ? 80000 : tradeSettings.MIN_ORDER_BOOK_LIQUIDITY_USD;
                     const depth = await fetch(`https://api.binance.com/api/v3/depth?symbol=${pair.symbol}&limit=100`).then(res => res.json());
                     const price = pair.price;
                     const range = 0.005; // +/- 0.5%
@@ -2064,7 +2054,66 @@ const tradingEngine = {
             position.quantity, position.total_cost_usd, position.realized_pnl, position.id
         );
         log('TRADE', `[PARTIAL TP] Sold ${settings.PARTIAL_TP_SELL_QTY_PCT}% of ${position.symbol} at $${actualSellPrice.toFixed(4)}. Realized Net PnL: $${netPnlFromSale.toFixed(2)}`);
-    }
+    },
+
+    async executeSecondPartial(position, currentPrice, settings) {
+        if (position.secondPartialDone || !position.initial_stop_loss) return;
+    
+        const initialRiskPerUnit = position.average_entry_price - position.initial_stop_loss;
+        if (initialRiskPerUnit <= 0) return;
+    
+        const takeProfitPrice = position.average_entry_price + (initialRiskPerUnit * settings.RISK_REWARD_RATIO);
+    
+        if (currentPrice >= takeProfitPrice) {
+            const remainingQty = position.quantity;
+            const sellQty = remainingQty * 0.5; // Sell 50% of what's left
+    
+            if (sellQty <= 0) return;
+    
+            let actualSellPrice = currentPrice;
+    
+            if (position.mode === 'REAL_LIVE') {
+                if (!binanceApiClient) {
+                    log('ERROR', `[REAL_LIVE][TP2] Cannot execute partial sell for ${position.symbol}. API client not initialized.`);
+                    return;
+                }
+                try {
+                    const formattedQty = formatQuantity(position.symbol, sellQty);
+                    if (formattedQty <= 0) {
+                        log('ERROR', `[REAL_LIVE][TP2] Aborting partial sell for ${position.symbol}. Quantity is zero.`);
+                        return;
+                    }
+                    log('TRADE', `[PARTIAL TP 2 - REAL_LIVE] Selling ${formattedQty} ${position.symbol} at MARKET.`);
+                    const orderResult = await binanceApiClient.createOrder(position.symbol, 'SELL', 'MARKET', formattedQty);
+                    if (parseFloat(orderResult.executedQty) > 0) {
+                        actualSellPrice = parseFloat(orderResult.cummulativeQuoteQty) / parseFloat(orderResult.executedQty);
+                    }
+                } catch (error) {
+                    log('ERROR', `[PARTIAL TP 2 - REAL_LIVE] FAILED to sell for ${position.symbol}: ${error.message}.`);
+                    return;
+                }
+            }
+    
+            const feeRate = (settings.TRANSACTION_FEE_PCT || 0) / 100;
+            const costOfSoldPortion = position.average_entry_price * sellQty;
+            const valueOfSoldPortion = actualSellPrice * sellQty;
+            const entryFeeForPortion = costOfSoldPortion * feeRate;
+            const exitFeeForPortion = valueOfSoldPortion * feeRate;
+            const netPnlFromSale = valueOfSoldPortion - costOfSoldPortion - entryFeeForPortion - exitFeeForPortion;
+    
+            position.quantity -= sellQty;
+            position.total_cost_usd -= costOfSoldPortion;
+            position.realized_pnl = (position.realized_pnl || 0) + netPnlFromSale;
+            position.secondPartialDone = true;
+            position.take_profit = Infinity; // Let the rest run on trailing stop
+    
+            await db.run(
+                'UPDATE trades SET quantity = ?, total_cost_usd = ?, realized_pnl = ?, secondPartialDone = 1, take_profit = ? WHERE id = ?',
+                position.quantity, position.total_cost_usd, position.realized_pnl, position.take_profit, position.id
+            );
+            log('TRADE', `[PARTIAL TP 2] Sold 50% of remaining ${position.symbol} at $${actualSellPrice.toFixed(4)}. Realized PnL: $${netPnlFromSale.toFixed(2)}. TP removed.`);
+        }
+    },
 };
 
 const checkGlobalSafetyRules = async () => {

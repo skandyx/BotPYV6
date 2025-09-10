@@ -43,11 +43,8 @@ const connect = () => {
     socket.onopen = () => {
         logService.log('WEBSOCKET', 'Successfully connected to backend.');
         statusCallback?.(WebSocketStatus.CONNECTED);
-
-        // Request the full, current state of the scanner from the backend
-        if (socket && socket.readyState === WebSocket.OPEN) {
-             socket.send(JSON.stringify({ type: 'GET_FULL_SCANNER_LIST' }));
-        }
+        // NOTE: The initial scanner list is now fetched via HTTP on app load/login for faster UI population.
+        // The WebSocket is now only responsible for real-time updates after the initial state is established.
     };
 
     socket.onmessage = (event) => {
@@ -55,6 +52,7 @@ const connect = () => {
             const message = JSON.parse(event.data);
             switch (message.type) {
                 case 'FULL_SCANNER_LIST':
+                    // This is now a legacy/fallback event. The primary load is via HTTP.
                     logService.log('WEBSOCKET', `Received full scanner list with ${message.payload.length} pairs.`);
                     scannerStore.updatePairList(message.payload);
                     break;

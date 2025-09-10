@@ -57,6 +57,7 @@ export interface Trade {
   initial_risk_usd?: number; // The initial $ amount at risk
   is_at_breakeven?: boolean;
   partial_tp_hit?: boolean;
+  secondPartialDone?: boolean; // New: For 2nd partial TP
   realized_pnl?: number; // For tracking profit from partial sells
   entry_snapshot?: ScannedPair; // Capture scanner state at entry
   trailing_stop_tightened?: boolean; // For adaptive trailing stop logic

@@ -6,8 +6,9 @@ import Spinner from '../components/common/Spinner';
 import { scannerStore } from '../services/scannerStore';
 import { useAppContext } from '../contexts/AppContext';
 import TradingViewWidget from '../components/common/TradingViewWidget';
-import { SearchIcon } from '../components/icons/Icons';
+import { SearchIcon, RefreshIcon } from '../components/icons/Icons';
 import Tooltip from '../components/common/Tooltip';
+import { api } from '../services/mockApi';
 
 
 type SortableKeys = keyof ScannedPair;
@@ -83,6 +84,7 @@ const ScannerPage: React.FC = () => {
   const [sortConfig, setSortConfig] = useState<SortConfig | null>({ key: 'score_value', direction: 'desc' });
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const { settings } = useAppContext();
 
   // Robust check to ensure all required settings for rendering are fully loaded.
@@ -110,6 +112,18 @@ const ScannerPage: React.FC = () => {
       unsubscribe();
     };
   }, []);
+  
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+        const freshData = await api.fetchScannedPairs();
+        scannerStore.updatePairList(freshData);
+    } catch (error) {
+        console.error("Failed to refresh scanner data:", error);
+    } finally {
+        setIsRefreshing(false);
+    }
+  };
 
   const requestSort = (key: SortableKeys) => {
     let direction: SortDirection = 'asc';
@@ -256,7 +270,7 @@ const ScannerPage: React.FC = () => {
 
 
       <div className="bg-[#14181f]/50 border border-[#2b2f38] rounded-lg shadow-lg overflow-hidden">
-         <div className="p-4 bg-[#14181f]/30">
+         <div className="p-4 bg-[#14181f]/30 flex justify-between items-center">
             <div className="relative w-full md:max-w-xs">
                 <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
                     <SearchIcon />
@@ -269,6 +283,14 @@ const ScannerPage: React.FC = () => {
                     className="block w-full rounded-md border-[#3e4451] bg-[#0c0e12]/50 pl-10 pr-4 py-2 shadow-sm focus:border-[#f0b90b] focus:ring-[#f0b90b] sm:text-sm text-white"
                 />
             </div>
+             <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="inline-flex items-center justify-center rounded-md border border-[#3e4451] px-3 py-2 text-sm font-medium text-gray-300 shadow-sm hover:bg-[#2b2f38] focus:outline-none focus:ring-2 focus:ring-[#f0b90b] focus:ring-offset-2 focus:ring-offset-[#14181f] disabled:opacity-50"
+                title="Rafraîchir les données du scanner"
+            >
+                <RefreshIcon className="h-5 w-5" isSpinning={isRefreshing} />
+            </button>
         </div>
         <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 20rem)' }}>
             <table className="min-w-full divide-y divide-[#2b2f38]">

@@ -28,14 +28,17 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         
         const initializeAndFetchData = async () => {
             try {
-                logService.log('INFO', 'Fetching settings and initializing...');
-                const settingsData = await api.fetchSettings();
+                logService.log('INFO', 'Fetching settings and scanner data via HTTP...');
+                const [settingsData, initialScannerData] = await Promise.all([
+                  api.fetchSettings(),
+                  api.fetchScannedPairs()
+                ]);
+                
                 setSettings(settingsData);
                 scannerStore.updateSettings(settingsData);
+                scannerStore.updatePairList(initialScannerData);
                 scannerStore.initialize();
 
-                // The initial scanner list will now be populated via WebSocket request
-                // after the connection is established. This is more reliable.
             } catch (error) {
                 logService.log('ERROR', `Failed to initialize app data: ${error}`);
             }
